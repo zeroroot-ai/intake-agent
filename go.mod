@@ -2,7 +2,10 @@ module github.com/zeroroot-ai/intake-agent
 
 go 1.27.4
 
-require github.com/zeroroot-ai/sdk v0.211.0
+require (
+	github.com/zeroroot-ai/sdk v0.211.0
+	google.golang.org/grpc v1.83.2
+)
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // indirect
@@ -21,6 +24,5 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260904194346-d0f1323225a4 // indirect
-	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )

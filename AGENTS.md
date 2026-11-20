@@ -38,7 +38,8 @@ A second read of one result must change the same finding or the same Alert.
 
 - An Alert has the identity `connector` and `result_id` (`LifecycleEntityObservation`).
 - A finding gets the idempotency key `ResultKey(connector, result id)`.
-  The daemon keeps a key for 24 hours only. See README.md, "Open points".
+  The finding id is stable only on a daemon that derives it from that key.
+  See README.md, "Open points".
 
 ## Do not
 

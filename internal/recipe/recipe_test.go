@@ -3,7 +3,10 @@
 
 package recipe
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func valid() Recipe {
 	return Recipe{
@@ -73,9 +76,28 @@ func TestBook(t *testing.T) {
 }
 
 // TestShippedRecipesAreValid makes sure that each shipped recipe passes
-// Validate, and so cites a vendor source.
+// Validate, and so cites a vendor source. With no shipped recipe, Default
+// refuses.
 func TestShippedRecipesAreValid(t *testing.T) {
-	if _, err := Default(); err != nil {
+	_, err := Default()
+	if len(All()) == 0 {
+		if !errors.Is(err, ErrNoRecipes) {
+			t.Fatalf("no recipe ships: err = %v", err)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("shipped recipes: %v", err)
+	}
+}
+
+// TestAnEmptyBookIsRefused: an agent with no recipe reads nothing, so it must
+// not start.
+func TestAnEmptyBookIsRefused(t *testing.T) {
+	if _, err := shipped(nil); !errors.Is(err, ErrNoRecipes) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := shipped([]Recipe{valid()}); err != nil {
+		t.Fatalf("one valid recipe: %v", err)
 	}
 }

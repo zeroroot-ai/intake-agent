@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/zeroroot-ai/intake-agent/internal/recipe"
 )
@@ -17,6 +19,7 @@ import (
 var errBoom = errors.New("boom")
 
 type fakeDaemon struct {
+	toolErr error
 	tools   []Tool
 	results map[string]string // connector -> JSON
 	invoked []string
@@ -26,7 +29,7 @@ type fakeDaemon struct {
 	failOn  string // result id that RaiseFlaw/RaiseAlert refuses
 }
 
-func (f *fakeDaemon) Tools(context.Context) ([]Tool, error) { return f.tools, nil }
+func (f *fakeDaemon) Tools(context.Context) ([]Tool, error) { return f.tools, f.toolErr }
 
 func (f *fakeDaemon) Invoke(_ context.Context, c, tool string, args map[string]any) (Call, error) {
 	f.invoked = append(f.invoked, c+"/"+tool)
@@ -206,23 +209,66 @@ func TestMarkerStopsAtTheFirstRefusal(t *testing.T) {
 	}
 }
 
-func TestBadResultsFailTheConnector(t *testing.T) {
-	for name, body := range map[string]string{
-		"no id":     `[{"ID":"","At":"1"}]`,
-		"no cursor": `[{"ID":"1","At":""}]`,
-		"not json":  `{`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			d := &fakeDaemon{tools: []Tool{{"scan", "list"}}, results: map[string]string{"scan": body}}
-			store := &memMarkers{m: map[string]recipe.Marker{}}
-			r := newReader(t, d, store, testRecipe("scan", recipe.Scanner))
-			if _, err := r.Pass(context.Background()); err == nil {
-				t.Fatal("want an error")
-			}
-			if len(d.flaws) != 0 || store.saves != 0 {
-				t.Fatal("a bad result must hand over nothing")
-			}
-		})
+// TestABadResultIsSkippedAndCounted: one result with no id or no cursor must
+// not stop the other results of its connector.
+func TestABadResultIsSkippedAndCounted(t *testing.T) {
+	d := &fakeDaemon{tools: []Tool{{"scan", "list"}}, results: map[string]string{
+		"scan": `[{"ID":"","At":"1"},{"ID":"1","At":""},{"ID":"2","At":"2"}]`,
+	}}
+	store := &memMarkers{m: map[string]recipe.Marker{}}
+	r := newReader(t, d, store, testRecipe("scan", recipe.Scanner))
+	sum, err := r.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if sum.Invalid != 2 || len(d.flaws) != 1 || d.flaws[0].Item.ID != "2" || len(sum.Failed) != 0 {
+		t.Fatalf("sum=%+v flaws=%+v", sum, d.flaws)
+	}
+	if store.m["scan"].Cursor != "2" {
+		t.Fatalf("marker = %+v", store.m["scan"])
+	}
+}
+
+func TestAResultThatIsNotJSONFailsTheConnector(t *testing.T) {
+	d := &fakeDaemon{tools: []Tool{{"scan", "list"}}, results: map[string]string{"scan": `{`}}
+	store := &memMarkers{m: map[string]recipe.Marker{}}
+	r := newReader(t, d, store, testRecipe("scan", recipe.Scanner))
+	if _, err := r.Pass(context.Background()); err == nil {
+		t.Fatal("want an error")
+	}
+	if len(d.flaws) != 0 || store.saves != 0 {
+		t.Fatal("a bad result must hand over nothing")
+	}
+}
+
+// TestACallHandsOverAtMostMaxItems: the pass hands over the oldest MaxItems
+// results and counts the rest. The next pass reads the rest.
+func TestACallHandsOverAtMostMaxItems(t *testing.T) {
+	const extra = 5
+	rows := make([]string, 0, MaxItems+extra)
+	for i := range MaxItems + extra {
+		rows = append(rows, fmt.Sprintf(`{"ID":"r%d","At":"%06d"}`, i, i))
+	}
+	body := "[" + strings.Join(rows, ",") + "]"
+	d := &fakeDaemon{tools: []Tool{{"edr", "list"}}, results: map[string]string{"edr": body}}
+	store := &memMarkers{m: map[string]recipe.Marker{}}
+	r := newReader(t, d, store, testRecipe("edr", recipe.EDR))
+	sum, err := r.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if sum.Alerts != MaxItems || sum.Overflow != extra {
+		t.Fatalf("pass 1: sum = %+v", sum)
+	}
+	if want := fmt.Sprintf("%06d", MaxItems-1); store.m["edr"].Cursor != want {
+		t.Fatalf("marker = %+v, want %s", store.m["edr"], want)
+	}
+	sum, err = r.Pass(context.Background())
+	if err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if sum.Alerts != extra || sum.Overflow != 0 || sum.Skipped != MaxItems {
+		t.Fatalf("pass 2: sum = %+v", sum)
 	}
 }
 
@@ -237,6 +283,22 @@ func TestRunRejectsNoInterval(t *testing.T) {
 	r := newReader(t, d, &memMarkers{m: map[string]recipe.Marker{}})
 	if err := r.Run(context.Background(), 0); err == nil {
 		t.Fatal("want an error")
+	}
+}
+
+// TestRunStopsOnARefusedGrant: with an expired grant no later pass can pass,
+// so Run returns the error and does not loop.
+func TestRunStopsOnARefusedGrant(t *testing.T) {
+	d := &fakeDaemon{toolErr: fmt.Errorf("search_tools: %w", ErrGrant)}
+	r := newReader(t, d, &memMarkers{m: map[string]recipe.Marker{}})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := r.Run(ctx, time.Millisecond)
+	if !errors.Is(err, ErrGrant) {
+		t.Fatalf("err = %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("Run returned only when the context ended")
 	}
 }
 

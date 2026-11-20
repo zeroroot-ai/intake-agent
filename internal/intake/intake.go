@@ -11,8 +11,12 @@
 // A pass reads each enabled connector that has a recipe. It skips a result that
 // is behind the marker of the connector. After each result that the daemon
 // accepted, it moves the marker. A restart then reads no result twice and skips
-// none. A result that a restart reads again changes the same finding or the
-// same Alert, because the daemon keys both on the id of the result.
+// none.
+//
+// An Alert has the identity of its connector and its result id, so a second
+// read of one alert changes the same Alert. A finding has the identity that
+// the daemon gives it. See the RaiseFlaw method of the daemon package for when
+// that identity is stable.
 package intake
 
 import (
@@ -25,6 +29,15 @@ import (
 
 	"github.com/zeroroot-ai/intake-agent/internal/recipe"
 )
+
+// ErrGrant means that the daemon refused the grant of the agent, for example
+// because it expired. No later call can pass with that grant, so Run stops.
+var ErrGrant = errors.New("intake: the daemon refused the grant")
+
+// MaxItems is the largest number of results that one call hands to the daemon.
+// A pass sorts the results by cursor and hands over the oldest MaxItems. The
+// marker stops at the last one, so the next pass reads the rest.
+const MaxItems = 1000
 
 // Tool is one tool of one enabled connector, as the daemon lists it.
 type Tool struct {
@@ -79,6 +92,11 @@ type Summary struct {
 	Flaws   int
 	Alerts  int
 	Skipped int
+	// Invalid counts the results with no id or no cursor. The pass skips them.
+	Invalid int
+	// Overflow counts the results over MaxItems in one call. The next pass
+	// reads them.
+	Overflow int
 	// Failed lists the connectors that stopped with an error.
 	Failed []string
 }
@@ -159,18 +177,26 @@ func (r *Reader) readOne(ctx context.Context, rec recipe.Recipe, m recipe.Marker
 	if err != nil {
 		return fmt.Errorf("read the result of %s: %w", rec.Tool, err)
 	}
+	todo := make([]recipe.Item, 0, len(items))
 	for i, it := range items {
-		if it.ID == "" || it.Cursor == "" {
-			return fmt.Errorf("result %d of %s has no id or no cursor", i, rec.Tool)
+		switch {
+		case it.ID == "" || it.Cursor == "":
+			sum.Invalid++
+			r.log.Warn("intake: skip a result with no id or no cursor",
+				"connector", rec.Connector, "tool", rec.Tool, "index", i)
+		case behind(m, it):
+			sum.Skipped++
+		default:
+			todo = append(todo, it)
 		}
 	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].Cursor < items[j].Cursor })
+	sort.SliceStable(todo, func(i, j int) bool { return todo[i].Cursor < todo[j].Cursor })
+	if len(todo) > MaxItems {
+		sum.Overflow += len(todo) - MaxItems
+		todo = todo[:MaxItems]
+	}
 
-	for _, it := range items {
-		if behind(m, it) {
-			sum.Skipped++
-			continue
-		}
+	for _, it := range todo {
 		h := Handoff{Connector: rec.Connector, Tool: rec.Tool, Class: rec.Class, CallID: call.ID, Item: it}
 		if rec.Class.IsFlaw() {
 			err = r.daemon.RaiseFlaw(ctx, h)
@@ -221,6 +247,8 @@ func advance(m recipe.Marker, it recipe.Item) recipe.Marker {
 
 // Run reads every interval until the context ends. A failed pass is logged and
 // the loop goes on, because an always-on agent must outlive a vendor outage.
+// When the daemon refuses the grant (ErrGrant), Run returns the error, because
+// no later pass can pass with that grant.
 func (r *Reader) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		return errors.New("intake: the interval must be positive")
@@ -229,11 +257,15 @@ func (r *Reader) Run(ctx context.Context, interval time.Duration) error {
 	defer t.Stop()
 	for {
 		sum, err := r.Pass(ctx)
+		if errors.Is(err, ErrGrant) {
+			return fmt.Errorf("intake pass: %w", err)
+		}
 		if err != nil {
 			r.log.Error("intake pass", "err", err, "failed", sum.Failed)
 		}
 		r.log.Info("intake pass done", "connectors", sum.Connectors, "flaws", sum.Flaws, "alerts", sum.Alerts,
-			"skipped", sum.Skipped, "no_recipe", sum.NoRecipe, "no_tool", sum.NoTool)
+			"skipped", sum.Skipped, "invalid", sum.Invalid, "overflow", sum.Overflow,
+			"no_recipe", sum.NoRecipe, "no_tool", sum.NoTool)
 		select {
 		case <-ctx.Done():
 			return nil

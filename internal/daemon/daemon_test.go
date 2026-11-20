@@ -7,13 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/zeroroot-ai/intake-agent/internal/intake"
 	"github.com/zeroroot-ai/intake-agent/internal/recipe"
 	commonpb "github.com/zeroroot-ai/sdk/api/gen/gibson/common/v1"
-	graphragpb "github.com/zeroroot-ai/sdk/api/gen/gibson/graphrag/v1"
 	harnesspb "github.com/zeroroot-ai/sdk/api/gen/gibson/harness/v1"
 )
 
@@ -24,7 +27,6 @@ type fakeWire struct {
 	toolResp *harnesspb.CallToolProtoResponse
 	findings []*harnesspb.SubmitFindingRequest
 	observed []*harnesspb.ObserveRequest
-	query    *harnesspb.QueryNodesResponse
 	err      error
 	respErr  *harnesspb.HarnessError
 }
@@ -42,10 +44,6 @@ func (w *fakeWire) SubmitFinding(_ context.Context, r *harnesspb.SubmitFindingRe
 func (w *fakeWire) Observe(_ context.Context, r *harnesspb.ObserveRequest) (*harnesspb.ObserveResponse, error) {
 	w.observed = append(w.observed, r)
 	return &harnesspb.ObserveResponse{Error: w.respErr}, w.err
-}
-
-func (w *fakeWire) QueryNodes(context.Context, *harnesspb.QueryNodesRequest) (*harnesspb.QueryNodesResponse, error) {
-	return w.query, w.err
 }
 
 func newHarness(t *testing.T, w *fakeWire) *Harness {
@@ -184,44 +182,64 @@ func TestRefusalsSurface(t *testing.T) {
 	if err := h.RaiseAlert(context.Background(), ho); err == nil {
 		t.Error("a refused alert must fail")
 	}
-	if err := h.Save(context.Background(), "c", recipe.Marker{Cursor: "1"}); err == nil {
-		t.Error("a refused marker must fail")
-	}
 	w.respErr, w.err = nil, errWire
 	if err := h.RaiseFlaw(context.Background(), ho); !errors.Is(err, errWire) {
 		t.Errorf("err = %v", err)
 	}
 }
 
-func TestSaveAndLoadMarker(t *testing.T) {
-	w := &fakeWire{}
-	h := newHarness(t, w)
-	m := recipe.Marker{Cursor: "2026-11-20T10:00:00Z", AtCursor: []string{"a", "b"}}
-	if err := h.Save(context.Background(), "wiz", m); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	mem := w.observed[0].GetMemory()
-	if mem.GetKind() != MarkerKind || mem.GetSourceRef() != "wiz" {
-		t.Fatalf("memory = %v", mem)
-	}
-
-	node := func(conn, text string, at int64) *graphragpb.QueryResult {
-		return &graphragpb.QueryResult{Node: &graphragpb.GraphNode{
-			Content: text, UpdatedAt: at,
-			Properties: map[string]*graphragpb.Value{"source_ref": {Kind: &graphragpb.Value_StringValue{StringValue: conn}}},
-		}}
-	}
-	w.query = &harnesspb.QueryNodesResponse{Results: []*graphragpb.QueryResult{
-		node("wiz", mem.GetText(), 20),
-		node("wiz", `{"cursor":"old"}`, 10),
-		node("tenable", `not json`, 30),
+// TestARefusalWithNoMessageIsAnError: a HarnessError with an empty message is
+// still a refusal.
+func TestARefusalWithNoMessageIsAnError(t *testing.T) {
+	bare := &harnesspb.HarnessError{Code: commonpb.ErrorCode_ERROR_CODE_PERMISSION_DENIED}
+	w := &fakeWire{respErr: bare, toolResp: &harnesspb.CallToolProtoResponse{
+		OutputJson: []byte(`{"candidates":[]}`), Error: bare,
 	}}
-	got, err := h.Load(context.Background())
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	h := newHarness(t, w)
+	ho := intake.Handoff{Connector: "c", Class: recipe.Scanner, Item: recipe.Item{ID: "1"}}
+	err := h.RaiseFlaw(context.Background(), ho)
+	if err == nil || !strings.Contains(err.Error(), "PERMISSION_DENIED") {
+		t.Errorf("finding: err = %v", err)
 	}
-	if len(got) != 1 || got["wiz"].Cursor != m.Cursor || len(got["wiz"].AtCursor) != 2 {
-		t.Fatalf("markers = %+v", got)
+	if err := h.RaiseAlert(context.Background(), ho); err == nil {
+		t.Error("alert: want an error")
+	}
+	if _, err := h.Tools(context.Background()); err == nil {
+		t.Error("search: want an error")
+	}
+	if _, err := h.Invoke(context.Background(), "c", "t", nil); err == nil {
+		t.Error("invoke: want an error")
+	}
+}
+
+// TestUnauthenticatedIsAGrantRefusal: the daemon answers an expired or bad
+// grant with Unauthenticated. The SDK wraps the status error.
+func TestUnauthenticatedIsAGrantRefusal(t *testing.T) {
+	expired := fmt.Errorf("SubmitFinding: %w", status.Error(codes.Unauthenticated, "task grant expired"))
+	w := &fakeWire{err: expired}
+	h := newHarness(t, w)
+	ho := intake.Handoff{Connector: "c", Class: recipe.Scanner, Item: recipe.Item{ID: "1"}}
+	if err := h.RaiseFlaw(context.Background(), ho); !errors.Is(err, intake.ErrGrant) {
+		t.Errorf("finding: err = %v", err)
+	}
+	if err := h.RaiseAlert(context.Background(), ho); !errors.Is(err, intake.ErrGrant) {
+		t.Errorf("alert: err = %v", err)
+	}
+	if _, err := h.Tools(context.Background()); !errors.Is(err, intake.ErrGrant) {
+		t.Errorf("search: err = %v", err)
+	}
+	w.err = status.Error(codes.PermissionDenied, "no can_execute")
+	if err := h.RaiseFlaw(context.Background(), ho); err == nil || errors.Is(err, intake.ErrGrant) {
+		t.Errorf("a denied call is not a refused grant: err = %v", err)
+	}
+}
+
+// TestNewMarkersRefuses: the agent has no marker store until the daemon gives a
+// Timeline marker event. It must not fall back to a memory node.
+func TestNewMarkersRefuses(t *testing.T) {
+	m, err := NewMarkers(&fakeWire{})
+	if !errors.Is(err, ErrNoMarkerStore) || m != nil {
+		t.Fatalf("markers=%v err=%v", m, err)
 	}
 }
 

@@ -29,11 +29,21 @@ The launch contract of a member is these variables:
 1. `search_tools` lists the tools of the enabled connectors.
 2. For each connector with a recipe, `invoke_tool` calls the read tool of the recipe.
 3. The agent skips each result that is behind the marker of the connector.
-4. The agent hands each other result to the daemon. A flaw goes to `SubmitFinding`. An alert goes to `Observe` as an `Alert` entity.
-5. After each result that the daemon accepted, the agent saves the marker as a memory observation of kind `intake-marker`.
+4. The agent skips and counts each result with no id or no cursor.
+5. The agent hands each other result to the daemon, at most 1000 for each call, oldest first. A flaw goes to `SubmitFinding`. An alert goes to `Observe` as an `Alert` entity.
+6. After each result that the daemon accepted, the agent saves the marker of the connector.
 
 A failure in one connector does not stop the others. The marker never moves past
-a result that the daemon refused.
+a result that the daemon refused. The next pass reads the results over the limit.
+When the daemon refuses the grant (`Unauthenticated`, for example an expired
+grant), the agent stops with an error.
+
+## The agent does not start yet
+
+The agent refuses to start, with an error, for two reasons:
+
+- No recipe ships (see below). An agent with no recipe reads nothing.
+- No marker store exists (see "Open points").
 
 ## The recipes
 
@@ -71,19 +81,24 @@ These points need a change that is not in this repository.
 - **The Go SDK has no wrapper for `PullJob`, `SubscribeInput` or the member
   heartbeat.** The agent does not pull jobs. The reconciler of the bank marks a
   member dead when its heartbeat stops.
-- **`search_tools` does not return the tool class.** The class is on the tenant
-  connector API and the discovery API of the branch `epic/blue-team-intake`. The
-  harness does not give it to an agent. The class comes from the recipe for now.
-- **The finding identity is not the result id.** The daemon gives each submitted
-  finding a new id. The agent sends an idempotency key from the connector and the
-  result id. The daemon keeps a key for 24 hours, and it does not update a finding
-  when the result changes. The daemon needs a finding id from tenant, connector and
-  result id, and an update path.
-- **The marker read is not verified.** The write is a memory observation. The read
-  is a `QueryNodes` call that assumes the node type `Observation`, the filters
-  `shape` and `kind`, the text in `content` and the connector in `source_ref`.
-  The daemon needs a Timeline event type for the marker and a read of the last
-  marker at start.
+- **The tool class comes from the recipe.** On the gibson branch
+  `integration/blue-team`, `search_tools` returns `tool_class` for each
+  candidate. The agent does not read it yet, because no recipe ships to check
+  it against.
+- **The finding identity is stable only on `integration/blue-team`.** The agent
+  sends the idempotency key `ResultKey(connector, result id)`. On that branch the
+  daemon derives the finding id from the tenant, the agent name and the key, and
+  writes the finding with an upsert on that id (gibson#1448). On gibson `main`
+  each submit gets a new finding id. The upsert also writes the status that the
+  agent sends, which is `open`. A second read of a result can so move a finding
+  in `fixing` back to `open`.
+- **No marker store.** The marker must have one author and one order. A query of
+  memory nodes has neither: it has no order and no author filter, so the newest
+  marker can drop out, and any writer in the tenant can forge one. The daemon
+  needs a Timeline marker event that it writes for the identity of this agent
+  only, and a read of the last marker of one connector. The gibson branch
+  `integration/blue-team` has neither, and the SDK has no client call for them.
+  Until both exist, `daemon.NewMarkers` refuses and the agent does not start.
 - **The interval is not a mission constraint.** A member has no mission. The
   interval is the variable `INTAKE_INTERVAL` of the manifest.
 - **`Alert` is not in the Taxonomy of `origin/main`.** It is on the branch

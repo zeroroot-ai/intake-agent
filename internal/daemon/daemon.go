@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/zeroroot-ai/intake-agent/internal/intake"
-	"github.com/zeroroot-ai/intake-agent/internal/recipe"
 	harnesspb "github.com/zeroroot-ai/sdk/api/gen/gibson/harness/v1"
 	"github.com/zeroroot-ai/sdk/finding"
 	"github.com/zeroroot-ai/sdk/serve"
@@ -32,21 +34,17 @@ const (
 // searchLimit is the largest number of tool candidates that one search asks for.
 const searchLimit = 500
 
-// MarkerKind is the kind of the memory observation that records a marker.
-const MarkerKind = "intake-marker"
-
 // Wire is the part of the callback client that the agent uses.
 // *serve.CallbackClient satisfies it.
 type Wire interface {
 	CallToolProto(ctx context.Context, req *harnesspb.CallToolProtoRequest) (*harnesspb.CallToolProtoResponse, error)
 	SubmitFinding(ctx context.Context, req *harnesspb.SubmitFindingRequest) (*harnesspb.SubmitFindingResponse, error)
 	Observe(ctx context.Context, req *harnesspb.ObserveRequest) (*harnesspb.ObserveResponse, error)
-	QueryNodes(ctx context.Context, req *harnesspb.QueryNodesRequest) (*harnesspb.QueryNodesResponse, error)
 }
 
 var _ Wire = (*serve.CallbackClient)(nil)
 
-// Harness implements intake.Daemon and intake.Markers over a Wire.
+// Harness implements intake.Daemon over a Wire.
 type Harness struct {
 	wire  Wire
 	agent string
@@ -60,10 +58,21 @@ func New(w Wire, agent string) (*Harness, error) {
 	return &Harness{wire: w, agent: agent}, nil
 }
 
-var (
-	_ intake.Daemon  = (*Harness)(nil)
-	_ intake.Markers = (*Harness)(nil)
-)
+var _ intake.Daemon = (*Harness)(nil)
+
+// ErrNoMarkerStore is the refusal of NewMarkers.
+var ErrNoMarkerStore = errors.New("daemon: no marker store: " +
+	"the harness callback service has no call to write or read a Timeline marker event")
+
+// NewMarkers returns the marker store of the agent. It always fails now.
+//
+// A marker must have one author and one order. Only the daemon can give both:
+// it writes the marker as a Timeline event for the identity of this agent, and
+// it returns the last such event of one connector. The callback service of the
+// SDK has no call for this. A memory node is not a marker store: a query of
+// memory nodes has no order and no author filter, so the newest marker can drop
+// out of the result and any writer in the tenant can forge one.
+func NewMarkers(Wire) (intake.Markers, error) { return nil, ErrNoMarkerStore }
 
 // Tools lists the tools of the enabled connectors through search_tools.
 func (h *Harness) Tools(ctx context.Context) ([]intake.Tool, error) {
@@ -116,23 +125,50 @@ func (h *Harness) Invoke(ctx context.Context, connector, tool string, args map[s
 func (h *Harness) callMeta(ctx context.Context, name string, input []byte) (output []byte, callID string, err error) {
 	resp, err := h.wire.CallToolProto(ctx, &harnesspb.CallToolProtoRequest{Name: name, InputJson: input})
 	if err != nil {
-		return nil, "", fmt.Errorf("%s: %w", name, err)
+		return nil, "", wireErr(name, err)
 	}
-	if e := resp.GetError(); e != nil && e.GetMessage() != "" {
-		return nil, resp.GetToolCallId(), fmt.Errorf("%s: %s", name, e.GetMessage())
+	if e := resp.GetError(); e != nil {
+		return nil, resp.GetToolCallId(), refusal(name, e)
 	}
 	return resp.GetOutputJson(), resp.GetToolCallId(), nil
 }
 
-// ResultKey is the stable identity of one result of one connector. Both the
-// finding and the Alert use it, so a second read of a result updates it.
+// wireErr wraps an error of the wire. An Unauthenticated status means that the
+// daemon refused the grant, for example because it expired. No later call can
+// pass with that grant, so the error also wraps intake.ErrGrant.
+func wireErr(op string, err error) error {
+	if status.Code(err) == codes.Unauthenticated {
+		return fmt.Errorf("%s: %w: %w", op, intake.ErrGrant, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// refusal turns a HarnessError into an error. A HarnessError with no message
+// is still a refusal, so the error names its code.
+func refusal(op string, e *harnesspb.HarnessError) error {
+	msg := e.GetMessage()
+	if msg == "" {
+		msg = "refused with no message"
+	}
+	return fmt.Errorf("%s: %s: %s", op, e.GetCode(), msg)
+}
+
+// ResultKey is the idempotency key of the finding of one result of one
+// connector.
 func ResultKey(connector, resultID string) string {
 	sum := sha256.Sum256([]byte(connector + "\x00" + resultID))
 	return "intake:" + hex.EncodeToString(sum[:16])
 }
 
-// RaiseFlaw submits the flaw as a finding. The idempotency key comes from the
-// connector and the result id, and the finding cites the recorded call.
+// RaiseFlaw submits the flaw as a finding, and the finding cites the recorded
+// call.
+//
+// The idempotency key is ResultKey(connector, result id). The daemon of the
+// gibson branch integration/blue-team derives the id of the finding from the
+// tenant, the agent name and this key (gibson#1448). It writes the finding with
+// an upsert on that id, so a second read of one result updates the same
+// finding. The daemon on gibson main does not do this: there each submit gets a
+// new finding id. See README.md, "Open points".
 func (h *Harness) RaiseFlaw(ctx context.Context, ho intake.Handoff) error {
 	f := &finding.Finding{
 		AgentName:   h.agent,
@@ -156,10 +192,10 @@ func (h *Harness) RaiseFlaw(ctx context.Context, ho intake.Handoff) error {
 		ToolCallIds:    f.ToolCallIDs,
 	})
 	if err != nil {
-		return fmt.Errorf("submit finding: %w", err)
+		return wireErr("submit finding", err)
 	}
-	if e := resp.GetError(); e != nil && e.GetMessage() != "" {
-		return fmt.Errorf("submit finding: %s", e.GetMessage())
+	if e := resp.GetError(); e != nil {
+		return refusal("submit finding", e)
 	}
 	return nil
 }
@@ -179,72 +215,16 @@ func (h *Harness) RaiseAlert(ctx context.Context, ho intake.Handoff) error {
 			"call_id":  ho.CallID,
 		},
 	}
-	return h.observe(ctx, &harnesspb.ObserveRequest{
+	resp, err := h.wire.Observe(ctx, &harnesspb.ObserveRequest{
 		Observation: &harnesspb.ObserveRequest_LifecycleEntity{LifecycleEntity: obs},
 	})
-}
-
-func (h *Harness) observe(ctx context.Context, req *harnesspb.ObserveRequest) error {
-	resp, err := h.wire.Observe(ctx, req)
 	if err != nil {
-		return fmt.Errorf("observe: %w", err)
+		return wireErr("observe", err)
 	}
-	if e := resp.GetError(); e != nil && e.GetMessage() != "" {
-		return fmt.Errorf("observe: %s", e.GetMessage())
+	if e := resp.GetError(); e != nil {
+		return refusal("observe", e)
 	}
 	return nil
-}
-
-// Save records the marker of a connector as a memory observation on the
-// Timeline.
-func (h *Harness) Save(ctx context.Context, connector string, m recipe.Marker) error {
-	text, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("encode the marker: %w", err)
-	}
-	return h.observe(ctx, &harnesspb.ObserveRequest{
-		Observation: &harnesspb.ObserveRequest_Memory{Memory: &harnesspb.MemoryObservation{
-			Text:      string(text),
-			Kind:      MarkerKind,
-			Tags:      []string{MarkerKind, connector},
-			SourceRef: connector,
-		}},
-	})
-}
-
-// Load reads the last marker of each connector back from the graph.
-//
-// The query and the field that holds the text are NOT verified against a
-// running daemon. See README.md, "Open points".
-func (h *Harness) Load(ctx context.Context) (map[string]recipe.Marker, error) {
-	resp, err := h.wire.QueryNodes(ctx, &harnesspb.QueryNodesRequest{Query: markerQuery()})
-	if err != nil {
-		return nil, fmt.Errorf("query the markers: %w", err)
-	}
-	if e := resp.GetError(); e != nil && e.GetMessage() != "" {
-		return nil, fmt.Errorf("query the markers: %s", e.GetMessage())
-	}
-	out := map[string]recipe.Marker{}
-	newest := map[string]int64{}
-	for _, r := range resp.GetResults() {
-		n := r.GetNode()
-		var m recipe.Marker
-		if err := json.Unmarshal([]byte(strings.TrimSpace(n.GetContent())), &m); err != nil || m.Cursor == "" {
-			continue
-		}
-		conn := ""
-		if p, ok := n.GetProperties()["source_ref"]; ok {
-			conn = p.GetStringValue()
-		}
-		if conn == "" {
-			continue
-		}
-		if at := n.GetUpdatedAt(); at >= newest[conn] {
-			newest[conn] = at
-			out[conn] = m
-		}
-	}
-	return out, nil
 }
 
 func severity(s string) finding.Severity {

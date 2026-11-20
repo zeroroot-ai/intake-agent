@@ -54,6 +54,12 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read the launch contract: %w", err)
 	}
+	// The recipe book comes before the dial. An agent with no recipe reads
+	// nothing, so it refuses to start and never runs as an empty loop.
+	book, err := recipe.Default()
+	if err != nil {
+		return fmt.Errorf("recipes: %w", err)
+	}
 	slog.Info("member started", "version", Version, "mission", m.MissionID,
 		"mission_run", m.MissionRunID, "agent_run", m.AgentRunID, "interval", m.Interval.String())
 
@@ -73,15 +79,15 @@ func run(ctx context.Context) error {
 		AgentName: AgentName, MissionID: m.MissionID, MissionRunID: m.MissionRunID, AgentRunID: m.AgentRunID,
 	})
 
-	book, err := recipe.Default()
-	if err != nil {
-		return fmt.Errorf("recipes: %w", err)
-	}
 	h, err := daemon.New(client, AgentName)
 	if err != nil {
 		return fmt.Errorf("harness: %w", err)
 	}
-	reader, err := intake.New(h, h, book, slog.Default())
+	markers, err := daemon.NewMarkers(client)
+	if err != nil {
+		return fmt.Errorf("markers: %w", err)
+	}
+	reader, err := intake.New(h, markers, book, slog.Default())
 	if err != nil {
 		return fmt.Errorf("reader: %w", err)
 	}
