@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"testing"
 
@@ -92,7 +91,7 @@ func newReader(t *testing.T, d Daemon, m Markers, rs ...recipe.Recipe) *Reader {
 	if err != nil {
 		t.Fatalf("book: %v", err)
 	}
-	r, err := New(d, m, book, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r, err := New(d, m, book, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

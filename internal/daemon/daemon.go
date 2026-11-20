@@ -113,7 +113,7 @@ func (h *Harness) Invoke(ctx context.Context, connector, tool string, args map[s
 	return intake.Call{JSON: res.Result, ID: callID}, nil
 }
 
-func (h *Harness) callMeta(ctx context.Context, name string, input []byte) ([]byte, string, error) {
+func (h *Harness) callMeta(ctx context.Context, name string, input []byte) (output []byte, callID string, err error) {
 	resp, err := h.wire.CallToolProto(ctx, &harnesspb.CallToolProtoRequest{Name: name, InputJson: input})
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: %w", name, err)

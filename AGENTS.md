@@ -5,7 +5,7 @@ This file is the contract. If this file and the code disagree, the code wins.
 
 ## What it does
 
-The agent reads the security tools of the buyer through connectors (ADR-0177).
+The agent reads the security tools of the buyer through connectors.
 Each pass does these steps for each enabled connector that has a recipe.
 
 1. List the tools of the enabled connectors with `search_tools`.

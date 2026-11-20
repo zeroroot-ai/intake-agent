@@ -2,7 +2,7 @@
 
 An always-on Gibson agent. It reads the security tools of the buyer through
 connectors. It turns each flaw into a finding and each alert into an `Alert`
-node (ADR-0177). It changes nothing in the tools of the buyer.
+node. It changes nothing in the tools of the buyer.
 
 It is built with the ADK, the same way as `cve-triage`. The agent contract is in
 [AGENTS.md](./AGENTS.md).

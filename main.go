@@ -3,7 +3,7 @@
 
 // Command intake-agent is an always-on Gibson agent. It reads the security
 // tools of the buyer through connectors. It turns each flaw into a finding and
-// each alert into an Alert node (ADR-0177).
+// each alert into an Alert node.
 //
 // It runs as a bank member (ADR-0119). It holds no vendor credential and has
 // no egress. The daemon is the one caller of a connector.
@@ -34,12 +34,19 @@ const AgentName = "intake-agent"
 var Version = "dev"
 
 func main() {
+	os.Exit(exitCode())
+}
+
+// exitCode runs the agent and returns the exit status. It exists so that the
+// signal context stops before the process exits.
+func exitCode() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	if err := run(ctx); err != nil {
 		slog.Error(AgentName, "version", Version, "err", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(ctx context.Context) error {

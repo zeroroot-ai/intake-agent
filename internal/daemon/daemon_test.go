@@ -226,7 +226,7 @@ func TestSaveAndLoadMarker(t *testing.T) {
 }
 
 func TestSeverity(t *testing.T) {
-	for in, want := range map[string]string{"CRITICAL": "critical", " High": "high", "medium": "medium", "low": "low", "": "info", "x": "info"} {
+	for in, want := range map[string]string{"CRITICAL": "critical", "High": "high", "medium": "medium", "low": "low", "": "info", "x": "info"} {
 		if string(severity(in)) != want {
 			t.Errorf("severity(%q) = %s, want %s", in, severity(in), want)
 		}

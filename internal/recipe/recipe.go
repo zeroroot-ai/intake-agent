@@ -18,7 +18,7 @@ import (
 	"strings"
 )
 
-// Class is the tool class of a connector (ADR-0177).
+// Class is the tool class of a connector.
 type Class string
 
 // The classes in scope for intake.
