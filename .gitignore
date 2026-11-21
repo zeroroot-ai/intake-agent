@@ -1,0 +1,23 @@
+# Gibson agent
+
+# Compiled binary
+/intake-agent
+
+# Local registration state — never commit credentials.
+.gibson/
+
+# Build artifacts
+/dist/
+
+# Go toolchain
+*.test
+*.out
+coverage.html
+
+# Editor cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Worktrees of parallel sessions
+.worktrees/

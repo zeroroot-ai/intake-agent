@@ -1,0 +1,82 @@
+name: go-ci
+
+# Thin caller for the org's three-tier Go CI (zeroroot-ai/.github
+# reusable-go-ci.yml), the same shape the OSS adk repo uses.
+#
+#   pull_request -> fast tier: mod-tidy drift, vet, build, test (no race).
+#   push:main    -> heavy tier: race + govulncheck. This repo has no merge
+#                   queue yet, so the authoritative tier runs on main.
+#
+# The module lives at the repo root. All zeroroot-ai Go deps (sdk) are
+# public Apache modules, so private-modules stays false.
+#
+# lint stays native (golangci-lint-action, install-mode: goinstall,
+# --new-from-rev diff scoping) instead of the reusable's built-in step, for
+# the same "v2 trap" reason adk records in its go-ci.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: go-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    if: github.event_name == 'pull_request'
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    with:
+      tier: fast
+      go-mod-path: .
+      skip-lint: true
+
+  heavy:
+    if: github.event_name == 'push'
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    with:
+      tier: heavy
+      go-mod-path: .
+
+  # The guard set lives in the Makefile (`check` = gofmt + go vet +
+  # lint-unwired), so a workstation runs exactly what this job runs and the
+  # two cannot drift. lint-unwired is the standing tracker for declarations
+  # nothing reads (#33, ADR-0094): the baseline only shrinks, so adding one
+  # fails here.
+  check:
+    if: github.event_name == 'pull_request'
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make check
+        run: make check
+
+  lint:
+    if: github.event_name == 'pull_request'
+    name: lint (new code)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint (new issues only)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.14.0
+          install-mode: goinstall
+          args: --new-from-rev=${{ github.event.pull_request.base.sha || 'HEAD~1' }} --timeout=8m
