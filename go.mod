@@ -4,7 +4,7 @@ go 1.27.4
 
 require (
 	github.com/zeroroot-ai/sdk v0.211.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.85.0
 )
 
 require (
