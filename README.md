@@ -288,9 +288,9 @@ frees the event id.
 text parts of an A2A message only (`a2a_inbound_runs.go`, `a2aserver/handler.go`).
 It drops a data part. So today the mission gets the fixed note and not the
 alert. The gibson change that passes the `webhook` data part to the mission as
-typed, untrusted task data is zeroroot-ai/gibson#1611. The tests of this repo assert the current contract
-(`TestTheMissionInputOfGibsonMainHasNoWebhookData`). Update that test when gibson
-changes.
+typed, untrusted task data is zeroroot-ai/gibson#1611. The tests of this repo
+assert the current contract (`TestTheMissionInputOfGibsonMainHasNoWebhookData`).
+Update that test when gibson changes.
 
 The event id and the source have only `A-Z a-z 0-9 . _ -`, so the message id
 `webhook:<source>:<id>` has one reading. It is for a planned dedup in gibson,
