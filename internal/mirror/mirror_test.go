@@ -231,12 +231,6 @@ func (f *failOpen) Open(ctx context.Context, c intake.Caller, it Item) (Ticket, 
 	return f.fakeTicketTool.Open(ctx, c, it)
 }
 
-func TestNoAdapterShips(t *testing.T) {
-	if _, err := Shipped(); !errors.Is(err, ErrNoAdapters) {
-		t.Fatalf("want ErrNoAdapters, got %v", err)
-	}
-}
-
 func TestNewNeedsEachPart(t *testing.T) {
 	if _, err := New(nil, &fakeSource{}, []Adapter{newTool()}, nil); err == nil {
 		t.Fatal("want an error")

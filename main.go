@@ -61,11 +61,6 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("read the launch contract: %w", err)
 	}
 	p := shippedParts()
-	// The parts that ship come before the dial. When none of the three loops can
-	// ever run, the agent refuses to start and never runs as an empty process.
-	if err := p.none(); err != nil {
-		return err
-	}
 	slog.Info("member started", "version", Version, "mission", m.MissionID,
 		"mission_run", m.MissionRunID, "agent_run", m.AgentRunID, "interval", m.Interval.String())
 
@@ -96,33 +91,25 @@ func run(ctx context.Context) error {
 	return runLoops(ctx, m.Interval, loops, slog.Default())
 }
 
+// envTicketQueue names the queue of the tickets: the project key on Jira, the id
+// of the assignment group on ServiceNow. It is optional.
+const envTicketQueue = "INTAKE_TICKET_QUEUE"
+
 // parts are the static parts of the loops: what ships with the binary. An error
 // means that the part is missing.
 type parts struct {
-	book       *recipe.Book
-	bookErr    error
-	tickets    []mirror.Adapter
-	ticketsErr error
-	pagers     []pager.Adapter
-	pagersErr  error
+	book    *recipe.Book
+	bookErr error
+	tickets []mirror.Adapter
+	pagers  []pager.Adapter
 }
 
 func shippedParts() parts {
 	var p parts
 	p.book, p.bookErr = recipe.Default()
-	p.tickets, p.ticketsErr = mirror.Shipped()
-	p.pagers, p.pagersErr = pager.Shipped()
+	p.tickets = mirror.Adapters(os.Getenv(envTicketQueue))
+	p.pagers = pager.Adapters()
 	return p
-}
-
-// none returns an error when no loop can run for lack of a static part.
-func (p parts) none() error {
-	if p.bookErr != nil && p.ticketsErr != nil && p.pagersErr != nil {
-		return fmt.Errorf("no loop can start: %w", errors.Join(
-			fmt.Errorf("recipes: %w", p.bookErr), fmt.Errorf("mirror: %w", p.ticketsErr),
-			fmt.Errorf("pager: %w", p.pagersErr)))
-	}
-	return nil
 }
 
 // seams are the parts of the loops that need the harness.
@@ -169,7 +156,7 @@ func newLoops(d intake.Daemon, p parts, s seams, log *slog.Logger) ([]loop, erro
 	}
 
 	items, ierr := s.items()
-	if err := errors.Join(wrap("items", ierr), wrap("adapters", p.ticketsErr)); err != nil {
+	if err := wrap("items", ierr); err != nil {
 		disabled("mirror", err)
 	} else if mi, err := mirror.New(d, items, p.tickets, log); err != nil {
 		disabled("mirror", err)
@@ -178,7 +165,7 @@ func newLoops(d intake.Daemon, p parts, s seams, log *slog.Logger) ([]loop, erro
 	}
 
 	waits, werr := s.waits()
-	if err := errors.Join(wrap("waits", werr), wrap("adapters", p.pagersErr)); err != nil {
+	if err := wrap("waits", werr); err != nil {
 		disabled("pager", err)
 	} else if pg, err := pager.New(d, waits, p.pagers, log); err != nil {
 		disabled("pager", err)

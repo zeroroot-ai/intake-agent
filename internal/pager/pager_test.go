@@ -220,9 +220,3 @@ func TestKeyIsStablePerWait(t *testing.T) {
 		t.Fatal("two kinds must give two keys")
 	}
 }
-
-func TestNoAdapterShips(t *testing.T) {
-	if _, err := Shipped(); !errors.Is(err, ErrNoAdapters) {
-		t.Fatalf("want ErrNoAdapters, got %v", err)
-	}
-}

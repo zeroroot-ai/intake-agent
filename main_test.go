@@ -32,29 +32,12 @@ func TestRunRefusesALaunchWithNoContract(t *testing.T) {
 	}
 }
 
-// TestRunRefusesToStartWithNoRecipe: with no recipe the agent stops before it
-// dials, so it never runs as an empty loop.
-func TestRunRefusesToStartWithNoRecipe(t *testing.T) {
-	if len(recipe.All()) != 0 {
-		t.Skip("a recipe ships")
-	}
-	t.Setenv("GIBSON_INSTANCE_MODE", "member")
-	t.Setenv("GIBSON_CG_JWT", "grant")
-	t.Setenv("GIBSON_CALLBACK_ENDPOINT", "127.0.0.1:1")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := run(ctx); !errors.Is(err, recipe.ErrNoRecipes) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
 // TestNewLoopsNamesEachMissingPart: when no loop can start, one error reports
 // every missing part.
 func TestNewLoopsNamesEachMissingPart(t *testing.T) {
 	_, err := newLoops(nil, shippedParts(), daemonSeams(nil), quiet())
 	for _, want := range []error{
 		recipe.ErrNoRecipes, daemon.ErrNoMarkerStore, daemon.ErrNoItemSource, daemon.ErrNoWaitSource,
-		mirror.ErrNoAdapters, pager.ErrNoAdapters,
 	} {
 		if !errors.Is(err, want) {
 			t.Errorf("the refusal does not name %q: %v", want, err)
@@ -94,7 +77,7 @@ func (nilAdapter) Page(context.Context, intake.Caller, pager.Waiting, string) er
 // TestAMissingPartDisablesOnlyItsOwnLoop: the pager has its parts, the intake
 // reader and the mirror do not. The pager starts.
 func TestAMissingPartDisablesOnlyItsOwnLoop(t *testing.T) {
-	p := parts{bookErr: recipe.ErrNoRecipes, ticketsErr: mirror.ErrNoAdapters, pagers: []pager.Adapter{nilAdapter{}}}
+	p := parts{bookErr: recipe.ErrNoRecipes, tickets: mirror.Adapters(""), pagers: []pager.Adapter{nilAdapter{}}}
 	s := daemonSeams(nil)
 	s.waits = func() (pager.Source, error) { return nilSource{}, nil }
 	var logs bytes.Buffer
@@ -110,7 +93,7 @@ func TestAMissingPartDisablesOnlyItsOwnLoop(t *testing.T) {
 }
 
 // TestTheIntakeReaderStartsWhenItsOwnPartsExist: the other two loops have no
-// adapter and no source.
+// source.
 func TestTheIntakeReaderStartsWhenItsOwnPartsExist(t *testing.T) {
 	book, err := recipe.NewBook(recipe.Recipe{
 		Connector: "c", Tool: "t", Class: recipe.Scanner, Source: "https://example.com/doc",
@@ -122,7 +105,7 @@ func TestTheIntakeReaderStartsWhenItsOwnPartsExist(t *testing.T) {
 	}
 	s := daemonSeams(nil)
 	s.markers = func() (intake.Markers, error) { return nilMarkers{}, nil }
-	p := parts{book: book, ticketsErr: mirror.ErrNoAdapters, pagersErr: pager.ErrNoAdapters}
+	p := parts{book: book, tickets: mirror.Adapters(""), pagers: pager.Adapters()}
 	loops, err := newLoops(nilDaemon{}, p, s, quiet())
 	if err != nil || len(loops) != 1 || loops[0].name != "intake" {
 		t.Fatalf("loops %v, err %v", loops, err)
@@ -150,5 +133,32 @@ func TestAGrantRefusalInOneLoopDoesNotStopTheOthers(t *testing.T) {
 	}
 	if after.Load() != 1 {
 		t.Fatal("loop b did not run to the end of its context")
+	}
+}
+
+type nilItems struct{}
+
+func (nilItems) Items(context.Context) ([]mirror.Item, error) { return nil, nil }
+
+// TestEachLoopStartsWithItsShippedAdapterAndItsSource: the ticket adapters and the
+// PagerDuty adapter ship, so a source is the only part that a loop still needs.
+func TestEachLoopStartsWithItsShippedAdapterAndItsSource(t *testing.T) {
+	book, err := recipe.NewBook(recipe.Recipe{
+		Connector: "c", Tool: "t", Class: recipe.Scanner, Source: "https://example.com/doc",
+		Args:  func(recipe.Marker) map[string]any { return nil },
+		Parse: func([]byte) ([]recipe.Item, error) { return nil, nil },
+	})
+	if err != nil {
+		t.Fatalf("book: %v", err)
+	}
+	s := seams{
+		markers: func() (intake.Markers, error) { return nilMarkers{}, nil },
+		items:   func() (mirror.Source, error) { return nilItems{}, nil },
+		waits:   func() (pager.Source, error) { return nilSource{}, nil },
+	}
+	p := parts{book: book, tickets: mirror.Adapters(""), pagers: pager.Adapters()}
+	loops, err := newLoops(nilDaemon{}, p, s, quiet())
+	if err != nil || len(loops) != 3 {
+		t.Fatalf("loops %v, err %v", loops, err)
 	}
 }

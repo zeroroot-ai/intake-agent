@@ -84,8 +84,8 @@ type Ticket struct {
 }
 
 // Adapter writes tickets in one ticket connector. It calls the tools of the
-// connector through the Caller and reads each tool name, argument and result
-// shape from a vendor document. README.md lists them.
+// connector through the Caller. The tool names, the arguments and the results
+// are the ticket contract of zeroroot-ai/connectors.
 type Adapter interface {
 	// Connector is the catalog id of the ticket connector.
 	Connector() string
@@ -99,21 +99,12 @@ type Adapter interface {
 	Close(ctx context.Context, c intake.Caller, t Ticket, it Item) error
 }
 
-// Adapters returns the adapters that ship with the agent. The list is empty on
-// purpose: no vendor document that was read gives the arguments and the result
-// of the ticket tools. README.md lists what is missing for each connector.
-func Adapters() []Adapter { return nil }
-
-// ErrNoAdapters is the refusal of Shipped.
-var ErrNoAdapters = errors.New("mirror: no adapter ships, so the mirror has no ticket connector to write")
-
-// Shipped returns the adapters that ship. It fails when none ships.
-func Shipped() ([]Adapter, error) {
-	a := Adapters()
-	if len(a) == 0 {
-		return nil, ErrNoAdapters
-	}
-	return a, nil
+// Adapters returns the adapters that ship. Jira and ServiceNow share the ticket
+// contract of the connectors repo, so both use one adapter shape. queue is the
+// project key on Jira and the id of the assignment group on ServiceNow. It can be
+// empty.
+func Adapters(queue string) []Adapter {
+	return []Adapter{NewTicketAdapter("jira", queue), NewTicketAdapter("servicenow", queue)}
 }
 
 // Summary is what one pass did.

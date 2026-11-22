@@ -21,6 +21,7 @@ package intake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -72,6 +73,23 @@ type Caller interface {
 	Tools(ctx context.Context) ([]Tool, error)
 	// Invoke calls one tool of one connector.
 	Invoke(ctx context.Context, connector, tool string, args map[string]any) (Call, error)
+}
+
+// CallInto calls one tool and decodes its JSON result into out. The loops that
+// write to a connector (the ticket mirror and the pager) use it. An error of the
+// call, for example ErrGrant, keeps its chain.
+func CallInto(ctx context.Context, c Caller, connector, tool string, args map[string]any, out any) error {
+	call, err := c.Invoke(ctx, connector, tool, args)
+	if err != nil {
+		return fmt.Errorf("call %s of %s: %w", tool, connector, err)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(call.JSON, out); err != nil {
+		return fmt.Errorf("read the result of %s of %s: %w", tool, connector, err)
+	}
+	return nil
 }
 
 // Daemon is everything the agent needs from the harness.

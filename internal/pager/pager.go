@@ -62,8 +62,8 @@ type Source interface {
 }
 
 // Adapter sends a page through one paging connector. It calls the tools of the
-// connector through the Caller and reads each tool name, argument and result
-// shape from a vendor document. README.md lists them.
+// connector through the Caller. The tool names, the arguments and the results
+// are those of the pagerduty server of zeroroot-ai/connectors.
 type Adapter interface {
 	// Connector is the catalog id of the paging connector.
 	Connector() string
@@ -74,23 +74,9 @@ type Adapter interface {
 	Page(ctx context.Context, c intake.Caller, w Waiting, key string) error
 }
 
-// Adapters returns the adapters that ship with the agent. The list is empty on
-// purpose: no vendor document that was read gives the arguments and the result
-// of the incident tools of the remote PagerDuty server. README.md lists what is
-// missing.
-func Adapters() []Adapter { return nil }
-
-// ErrNoAdapters is the refusal of Shipped.
-var ErrNoAdapters = errors.New("pager: no adapter ships, so the pager has no paging connector to call")
-
-// Shipped returns the adapters that ship. It fails when none ships.
-func Shipped() ([]Adapter, error) {
-	a := Adapters()
-	if len(a) == 0 {
-		return nil, ErrNoAdapters
-	}
-	return a, nil
-}
+// Adapters returns the adapters that ship: PagerDuty, through the paging server
+// of zeroroot-ai/connectors.
+func Adapters() []Adapter { return []Adapter{NewPagerDutyAdapter()} }
 
 // Summary is what one pass did.
 type Summary struct {
