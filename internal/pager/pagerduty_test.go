@@ -196,7 +196,7 @@ func TestAKeyOverTheLimitMakesNoCall(t *testing.T) {
 	}
 }
 
-func TestAGrantRefusalKeepsItsChainThroughThePagerDutyAdapter(t *testing.T) {
+func TestAGrantRefusalKeepsItsChainThroughThePagerDuty(t *testing.T) {
 	srv := newPD()
 	srv.grantErr = fmt.Errorf("daemon: %w", intake.ErrGrant)
 	p := newPDPager(t, srv, &fakeSource{items: []Waiting{wait("f-1", 5*time.Hour)}})

@@ -45,7 +45,7 @@ var (
 )
 
 func (s *ticketServer) Tools(context.Context) ([]intake.Tool, error) {
-	var out []intake.Tool
+	out := make([]intake.Tool, 0, len(s.connectors))
 	for _, c := range s.connectors {
 		out = append(out, intake.Tool{Connector: c, Name: "create_ticket"})
 	}
@@ -66,92 +66,112 @@ func (s *ticketServer) Invoke(_ context.Context, connector, tool string, a map[s
 		return intake.Call{}, s.grantErr
 	}
 	s.calls = append(s.calls, connector+"/"+tool)
-	str := func(k string) string { v, _ := a[k].(string); return v }
-	out := map[string]any{}
-	switch tool {
-	case "create_ticket":
-		titleLen := len([]rune(str("title")))
-		if str("title") == "" || titleLen > 255 || str("description") == "" || len(str("description")) > 32000 {
-			return intake.Call{}, errors.New("create_ticket: bad title or description")
-		}
-		if p := str("priority"); p != "" && p != "low" && p != "medium" && p != "high" && p != "critical" {
-			return intake.Call{}, errors.New("create_ticket: bad priority")
-		}
-		labels, _ := a["labels"].([]string)
-		for _, l := range labels {
-			if !srvLabel.MatchString(l) {
-				return intake.Call{}, fmt.Errorf("create_ticket: bad label %q", l)
-			}
-		}
-		key := str("dedup_key")
-		if key != "" && (len(key) > 100 || !srvDedup.MatchString(key)) {
-			return intake.Call{}, errors.New("create_ticket: bad dedup_key")
-		}
-		for _, t := range s.tickets {
-			if key != "" && t.key == key {
-				out["ticket_id"], out["existing"] = t.id, true
-				return result(out), nil
-			}
-		}
-		t := &srvTicket{id: fmt.Sprintf("T%d", len(s.tickets)+1), key: key, title: str("title"),
-			description: str("description"), priority: str("priority"), queue: str("queue"), labels: labels}
-		s.tickets = append(s.tickets, t)
-		if s.failAfterCreate {
-			s.failAfterCreate = false
-			return intake.Call{}, errors.New("create_ticket: timeout")
-		}
-		out["ticket_id"], out["number"], out["url"], out["existing"] = t.id, "N-"+t.id, "https://t/"+t.id, false
-	case "update_ticket":
-		t, err := s.find(str("ticket_id"))
-		if err != nil {
-			return intake.Call{}, err
-		}
-		if t.closed {
-			return intake.Call{}, errors.New("update_ticket: the ticket is closed")
-		}
-		if str("title") == "" && str("description") == "" && str("priority") == "" {
-			return intake.Call{}, errors.New("update_ticket: give at least one field")
-		}
-		if v := str("title"); v != "" {
-			t.title = v
-		}
-		if v := str("priority"); v != "" {
-			t.priority = v
-		}
-		out["ticket_id"], out["action"], out["status"] = t.id, "updated", "open"
-	case "add_comment":
-		t, err := s.find(str("ticket_id"))
-		if err != nil || str("body") == "" {
-			return intake.Call{}, errors.New("add_comment: bad input")
-		}
-		t.comments = append(t.comments, str("body"))
-		out["ticket_id"], out["action"] = t.id, "commented"
-	case "close_ticket":
-		t, err := s.find(str("ticket_id"))
-		if err != nil || str("resolution") == "" {
-			return intake.Call{}, errors.New("close_ticket: bad input")
-		}
-		t.closed, t.resolution = true, str("resolution")
-		out["ticket_id"], out["action"], out["status"] = t.id, "closed", "closed"
-	case "search_tickets":
-		var found []map[string]any
-		for _, t := range s.tickets {
-			if s.searchBlind || (str("label") != "" && !contains(t.labels, str("label"))) {
-				continue
-			}
-			if st := str("status"); (st == "" || st == "open") && t.closed || st == "closed" && !t.closed {
-				continue
-			}
-			if q := str("queue"); q != "" && t.queue != q {
-				continue
-			}
-			found = append(found, map[string]any{"ticket_id": t.id, "title": t.title, "closed": t.closed})
-		}
-		out["tickets"], out["count"] = found, len(found)
-	default:
+	handlers := map[string]func(map[string]any) (map[string]any, error){
+		"create_ticket":  s.create,
+		"update_ticket":  s.update,
+		"add_comment":    s.comment,
+		"close_ticket":   s.closeTicket,
+		"search_tickets": s.search,
+	}
+	h, ok := handlers[tool]
+	if !ok {
 		return intake.Call{}, fmt.Errorf("no tool %q", tool)
 	}
+	out, err := h(a)
+	if err != nil {
+		return intake.Call{}, err
+	}
 	return result(out), nil
+}
+
+func str(a map[string]any, k string) string { v, _ := a[k].(string); return v }
+
+func (s *ticketServer) create(a map[string]any) (map[string]any, error) {
+	titleLen := len([]rune(str(a, "title")))
+	if str(a, "title") == "" || titleLen > 255 || str(a, "description") == "" || len(str(a, "description")) > 32000 {
+		return nil, errors.New("create_ticket: bad title or description")
+	}
+	if p := str(a, "priority"); p != "" && p != "low" && p != "medium" && p != "high" && p != "critical" {
+		return nil, errors.New("create_ticket: bad priority")
+	}
+	labels, _ := a["labels"].([]string)
+	for _, l := range labels {
+		if !srvLabel.MatchString(l) {
+			return nil, fmt.Errorf("create_ticket: bad label %q", l)
+		}
+	}
+	key := str(a, "dedup_key")
+	if key != "" && (len(key) > 100 || !srvDedup.MatchString(key)) {
+		return nil, errors.New("create_ticket: bad dedup_key")
+	}
+	for _, t := range s.tickets {
+		if key != "" && t.key == key {
+			return map[string]any{"ticket_id": t.id, "existing": true}, nil
+		}
+	}
+	t := &srvTicket{id: fmt.Sprintf("T%d", len(s.tickets)+1), key: key, title: str(a, "title"),
+		description: str(a, "description"), priority: str(a, "priority"), queue: str(a, "queue"), labels: labels}
+	s.tickets = append(s.tickets, t)
+	if s.failAfterCreate {
+		s.failAfterCreate = false
+		return nil, errors.New("create_ticket: timeout")
+	}
+	return map[string]any{"ticket_id": t.id, "number": "N-" + t.id, "url": "https://t/" + t.id, "existing": false}, nil
+}
+
+func (s *ticketServer) update(a map[string]any) (map[string]any, error) {
+	t, err := s.find(str(a, "ticket_id"))
+	if err != nil {
+		return nil, err
+	}
+	if t.closed {
+		return nil, errors.New("update_ticket: the ticket is closed")
+	}
+	if str(a, "title") == "" && str(a, "description") == "" && str(a, "priority") == "" {
+		return nil, errors.New("update_ticket: give at least one field")
+	}
+	if v := str(a, "title"); v != "" {
+		t.title = v
+	}
+	if v := str(a, "priority"); v != "" {
+		t.priority = v
+	}
+	return map[string]any{"ticket_id": t.id, "action": "updated", "status": "open"}, nil
+}
+
+func (s *ticketServer) comment(a map[string]any) (map[string]any, error) {
+	t, err := s.find(str(a, "ticket_id"))
+	if err != nil || str(a, "body") == "" {
+		return nil, errors.New("add_comment: bad input")
+	}
+	t.comments = append(t.comments, str(a, "body"))
+	return map[string]any{"ticket_id": t.id, "action": "commented"}, nil
+}
+
+func (s *ticketServer) closeTicket(a map[string]any) (map[string]any, error) {
+	t, err := s.find(str(a, "ticket_id"))
+	if err != nil || str(a, "resolution") == "" {
+		return nil, errors.New("close_ticket: bad input")
+	}
+	t.closed, t.resolution = true, str(a, "resolution")
+	return map[string]any{"ticket_id": t.id, "action": "closed", "status": "closed"}, nil
+}
+
+func (s *ticketServer) search(a map[string]any) (map[string]any, error) {
+	var found []map[string]any
+	for _, t := range s.tickets {
+		if s.searchBlind || (str(a, "label") != "" && !contains(t.labels, str(a, "label"))) {
+			continue
+		}
+		if st := str(a, "status"); (st == "" || st == "open") && t.closed || st == "closed" && !t.closed {
+			continue
+		}
+		if q := str(a, "queue"); q != "" && t.queue != q {
+			continue
+		}
+		found = append(found, map[string]any{"ticket_id": t.id, "title": t.title, "closed": t.closed})
+	}
+	return map[string]any{"tickets": found, "count": len(found)}, nil
 }
 
 func result(v any) intake.Call {

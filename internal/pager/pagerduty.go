@@ -29,23 +29,23 @@ const (
 	maxDedupKey = 255
 )
 
-// PagerDutyAdapter pages through the paging connector pagerduty. It keeps no
+// PagerDuty pages through the paging connector pagerduty. It keeps no
 // state. The dedup key of the alert is the key of the wait, so PagerDuty groups
 // each repeat of a trigger into one alert, and find_incidents shows that it
 // exists.
-type PagerDutyAdapter struct{}
+type PagerDuty struct{}
 
-var _ Adapter = PagerDutyAdapter{}
+var _ Adapter = PagerDuty{}
 
-// NewPagerDutyAdapter returns the adapter.
-func NewPagerDutyAdapter() PagerDutyAdapter { return PagerDutyAdapter{} }
+// NewPagerDuty returns the adapter.
+func NewPagerDuty() PagerDuty { return PagerDuty{} }
 
 // Connector is the catalog id of the connector.
-func (PagerDutyAdapter) Connector() string { return "pagerduty" }
+func (PagerDuty) Connector() string { return "pagerduty" }
 
 // Paged reports whether an incident exists for the key. find_incidents returns
 // the incidents of every status, so a page that was already answered counts too.
-func (PagerDutyAdapter) Paged(ctx context.Context, c intake.Caller, key string) (bool, error) {
+func (PagerDuty) Paged(ctx context.Context, c intake.Caller, key string) (bool, error) {
 	if len(key) > maxDedupKey {
 		return false, fmt.Errorf("the key %q is longer than %d characters", key, maxDedupKey)
 	}
@@ -61,7 +61,7 @@ func (PagerDutyAdapter) Paged(ctx context.Context, c intake.Caller, key string) 
 
 // Page triggers an alert. The call is safe to repeat: PagerDuty groups a repeat
 // with the same dedup_key into the alert that is open.
-func (PagerDutyAdapter) Page(ctx context.Context, c intake.Caller, w Waiting, key string) error {
+func (PagerDuty) Page(ctx context.Context, c intake.Caller, w Waiting, key string) error {
 	if len(key) > maxDedupKey {
 		return fmt.Errorf("the key %q is longer than %d characters", key, maxDedupKey)
 	}

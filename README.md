@@ -147,7 +147,7 @@ They are not from a vendor MCP server, whose tool arguments are not published.
 | Connector (class) | Adapter | Tools |
 |---|---|---|
 | `jira`, `servicenow` (ticket) | `mirror.TicketAdapter`, one shape for both | `search_tickets`, `create_ticket`, `update_ticket`, `add_comment`, `close_ticket` |
-| `pagerduty` (paging) | `pager.PagerDutyAdapter` | `find_incidents`, `trigger_alert` |
+| `pagerduty` (paging) | `pager.PagerDuty` | `find_incidents`, `trigger_alert` |
 
 - The ticket id is the dedup key of `create_ticket` and a label `gibson:<id>`. An
   id that the contract cannot carry (more than 43 characters, or a character
