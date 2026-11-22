@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # static-debian13, not static-debian12. The binary is static and reads nothing
 # from the Debian userland. The same base and digest as cve-triage. Move the
 # digest here when a scanner names a package in this image.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS runtime
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS runtime
 
 # The binary sits at a stable, documented path because setec does NOT consult
 # the image ENTRYPOINT. The catalog manifest names the member command
