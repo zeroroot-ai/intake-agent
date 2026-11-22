@@ -26,11 +26,18 @@ is an alert and becomes an `Alert` node, never a finding.
 | `internal/recipe` | The recipe type and the shipped recipes. One file for each connector. |
 | `internal/intake` | The pass and the loop. It uses two seams: `Daemon` and `Markers`. |
 | `internal/daemon` | The one place that calls the harness callback service. |
+| `internal/mirror` | The ticket mirror loop (gibson#1450). It uses a `Source` and one `Adapter` for each ticket connector. |
+| `internal/pager` | The pager loop (gibson#1501). It uses a `Source` and one `Adapter` for each paging connector. |
+| `internal/sender` | The webhook sender (gibson#1451). It is a second binary at `cmd/webhook-sender`. |
 
 To add a connector, add `internal/recipe/<connector>.go` and list it in
 `recipes.go`. A recipe needs a vendor source, a tool name, its arguments and its
 result shape. Do not add a recipe for a tool that nobody verified in a vendor
 document.
+
+The mirror and the pager reach a connector only through `intake.Caller`. They
+keep no state outside the ticket tool and the paging tool. A tenant with no
+ticket connector or no paging connector gets no error. The loop logs it once.
 
 ## Identity of a result
 

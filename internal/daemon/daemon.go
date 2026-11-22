@@ -20,6 +20,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/zeroroot-ai/intake-agent/internal/intake"
+	"github.com/zeroroot-ai/intake-agent/internal/mirror"
+	"github.com/zeroroot-ai/intake-agent/internal/pager"
 	harnesspb "github.com/zeroroot-ai/sdk/api/gen/gibson/harness/v1"
 	"github.com/zeroroot-ai/sdk/finding"
 	"github.com/zeroroot-ai/sdk/serve"
@@ -73,6 +75,28 @@ var ErrNoMarkerStore = errors.New("daemon: no marker store: " +
 // memory nodes has no order and no author filter, so the newest marker can drop
 // out of the result and any writer in the tenant can forge one.
 func NewMarkers(Wire) (intake.Markers, error) { return nil, ErrNoMarkerStore }
+
+// ErrNoItemSource is the refusal of NewItemSource.
+var ErrNoItemSource = errors.New("daemon: no item source: " +
+	"the harness callback service has no call to list the findings and incidents of the tenant with their status")
+
+// NewItemSource returns the source of the ticket mirror. It always fails now.
+//
+// GetFindings of the callback service is scoped to one mission, and a member
+// has no mission. The tenant call that lists findings needs a user or a service
+// identity, and a member is an agent identity. See README.md, "Open points".
+func NewItemSource(Wire) (mirror.Source, error) { return nil, ErrNoItemSource }
+
+// ErrNoWaitSource is the refusal of NewWaitSource.
+var ErrNoWaitSource = errors.New("daemon: no wait source: " +
+	"the harness callback service has no call for ListWaitingOnPerson or for the wait limit of the tenant")
+
+// NewWaitSource returns the source of the pager. It always fails now.
+//
+// ListWaitingOnPerson is a call of the WorldService. Its authz rule admits a
+// user and a service identity, and a member is an agent identity. The tenant has
+// no wait limit setting and no API, so the pager uses DefaultLimit. See README.md, "Open points".
+func NewWaitSource(Wire) (pager.Source, error) { return nil, ErrNoWaitSource }
 
 // Tools lists the tools of the enabled connectors through search_tools.
 func (h *Harness) Tools(ctx context.Context) ([]intake.Tool, error) {

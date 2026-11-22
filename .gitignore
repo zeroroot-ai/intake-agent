@@ -2,6 +2,7 @@
 
 # Compiled binary
 /intake-agent
+/webhook-sender
 
 # Local registration state — never commit credentials.
 .gibson/

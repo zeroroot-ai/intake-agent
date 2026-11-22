@@ -10,9 +10,10 @@ UNWIRED_VERSION ?= v0.8.1
 
 .PHONY: build test check check-fmt vet lint lint-unwired lint-unwired-write run image
 
-## build: compile the agent binary.
+## build: compile the agent binary and the webhook sender.
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o webhook-sender ./cmd/webhook-sender
 
 ## test: run unit tests.
 test:
