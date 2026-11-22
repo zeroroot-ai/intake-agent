@@ -23,6 +23,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+
+	"github.com/zeroroot-ai/sdk/a2ainbound"
 )
 
 var secret = []byte("a-shared-secret-of-at-least-32-bytes")
@@ -50,7 +52,7 @@ type fakeGibson struct {
 	missions []*a2a.Message
 	reject   bool
 	// resetOnRead makes the edge close the connection after it read the request
-	// and before it did any work, as a reset after the dial does.
+	// and before it did any work. The client then gets a read error.
 	resetOnRead bool
 	// dropReply makes the edge record the message and then close the connection
 	// with no reply, as a lost reply does.
@@ -122,9 +124,9 @@ type stubSigner struct {
 
 func (s stubSigner) SignPath(string) (string, error) { return s.token, s.err }
 
-func newSender(t *testing.T, g *fakeGibson, signer PathSigner) (*Sender, *bytes.Buffer) {
+func newSender(t *testing.T, g *fakeGibson, signer a2ainbound.PathSigner) (*Sender, *bytes.Buffer) {
 	t.Helper()
-	c, err := NewInbound(g.srv.URL, signer, g.srv.Client().Transport)
+	c, err := NewClient(g.srv.URL, signer, g.srv.Client().Transport)
 	if err != nil {
 		t.Fatalf("a2a client: %v", err)
 	}
@@ -422,7 +424,7 @@ func TestOnlyPostIsAccepted(t *testing.T) {
 
 func TestNewNeedsEachPart(t *testing.T) {
 	g := newGibson(t)
-	c, err := NewInbound(g.srv.URL, stubSigner{}, nil)
+	c, err := NewClient(g.srv.URL, stubSigner{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,9 +570,10 @@ func TestAnIDIsHeldUntilTwiceTheWindowAfterTheEvent(t *testing.T) {
 	}
 }
 
-// TestAWriteErrorAfterTheDialKeepsTheIDHeld: the connection opened, then it broke.
-// The sender cannot know what Gibson did, so the id stays held.
-func TestAWriteErrorAfterTheDialKeepsTheIDHeld(t *testing.T) {
+// TestAReadErrorAfterTheRequestWasWrittenKeepsTheIDHeld: the connection opened and
+// the sender wrote the request. Then the edge closed the connection, so the read
+// of the reply failed. The sender cannot know what Gibson did, so the id stays held.
+func TestAReadErrorAfterTheRequestWasWrittenKeepsTheIDHeld(t *testing.T) {
 	g := newGibson(t)
 	g.resetOnRead = true
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
