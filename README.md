@@ -149,23 +149,44 @@ They are not from a vendor MCP server, whose tool arguments are not published.
 | `jira`, `servicenow` (ticket) | `mirror.TicketAdapter`, one shape for both | `search_tickets`, `create_ticket`, `update_ticket`, `add_comment`, `close_ticket` |
 | `pagerduty` (paging) | `pager.OnCall` | `find_incidents`, `trigger_alert` |
 
-- The ticket id is the dedup key of `create_ticket` and a label `gibson:<id>`. An
-  id that the contract cannot carry (more than 43 characters, or a character
-  outside `A-Z a-z 0-9 . _ : -`) is an error and makes no call.
+- The dedup key of a ticket is `gibson:<kind>:<id>`, for example
+  `gibson:finding:f-1`. It is the one handle that Jira (a label) and ServiceNow
+  (`correlation_id`) both keep. The adapter sends no label at all, because
+  ServiceNow refuses one. It finds the ticket with `search_tickets` and its
+  `dedup_key` filter. An id that the key cannot carry (more than 85 characters, or
+  a character outside `A-Z a-z 0-9 . _ : -`) is an error and makes no call.
+- **Dependency on connectors.** The `dedup_key` filter of `search_tickets` is in
+  the contract that the connectors lane adds. It is not in v0.3.0. Until that
+  release ships, a server refuses the filter, and the mirror fails its search with
+  the message of the server.
+- When a search gives two tickets for one key, the adapter takes the oldest by
+  `created_at` and logs it.
+- **`INTAKE_TICKET_QUEUE` is required for Jira.** It is the project key, for
+  example `SEC` (`^[A-Z][A-Z0-9_]{1,9}$`). Jira refuses a create with no project.
+  When it is missing or wrong, the mirror writes nothing and logs the cause one
+  time. For ServiceNow it is optional, and it is the 32 character id of the
+  assignment group.
 - The ticket title starts with the last status, for example `[fixing] Open port`.
   The contract has no call to change a label, so the title is the record that
-  `update_ticket` can change and `search_tickets` returns.
+  `update_ticket` can change and `search_tickets` returns. A status that is not a
+  lower case word (`a-z` and `_`) is an error before any write.
 - A status change adds a comment, then changes the title. The contract has no tool
   to reopen a ticket, so an item that leaves `verified` gives an error.
-- The dedup key of an alert is the key of the wait. The pager asks `find_incidents`
-  before it triggers, and a repeat of `trigger_alert` with one key makes one
-  incident. A restart or a timeout so makes no second page.
-- `INTAKE_TICKET_QUEUE` is the queue of the tickets: the project key on Jira, the
-  id of the assignment group on ServiceNow. It is optional.
+- The servers count bytes and refuse a control character in a title and in a
+  summary. The adapter strips each control character, makes the text valid UTF-8,
+  and cuts at a character to at most 255 bytes for a title, 32000 for a
+  description and 1024 for a summary. A value of `custom_details` has at most 500
+  bytes, and an empty value is left out.
+- The dedup key of an alert is the key of the wait. The adapter checks it against
+  the format of the server (at most 255 bytes of `A-Z a-z 0-9 . _ : / @ = + -`)
+  before the call. The pager asks `find_incidents` before it triggers, and a
+  repeat of `trigger_alert` with one key makes one incident. A restart or a
+  timeout so makes no second page.
 - The contract says that two calls at the same time can still make two tickets.
   One agent runs one pass at a time.
-- The tests use mocks that follow the contract. No test ran against a live Jira,
-  ServiceNow or PagerDuty.
+- The tests use mocks that apply the refusals of the real servers. Each refusal is
+  copied from a file of zeroroot-ai/connectors at v0.3.0, and the file is named in
+  a comment. No test ran against a live Jira, ServiceNow or PagerDuty.
 
 ## Why the mirror and the pager are loops of this agent
 

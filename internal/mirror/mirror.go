@@ -89,6 +89,9 @@ type Ticket struct {
 type Adapter interface {
 	// Connector is the catalog id of the ticket connector.
 	Connector() string
+	// Ready reports why the adapter cannot work, for example a setting that is
+	// missing. The mirror then writes nothing and logs the cause one time.
+	Ready() error
 	// Find returns the ticket of the item. The bool is false when none exists.
 	Find(ctx context.Context, c intake.Caller, it Item) (Ticket, bool, error)
 	// Open opens one ticket for the item, with its severity and its link.
@@ -118,6 +121,8 @@ type Summary struct {
 	NoTicket int
 	// NoConnector is true when the tenant has no ticket connector.
 	NoConnector bool
+	// Disabled is true when the adapter of the connector is not ready.
+	Disabled bool
 }
 
 // Mirror runs the passes.
@@ -129,6 +134,8 @@ type Mirror struct {
 	// warned is true after the mirror logged that the tenant has no ticket
 	// connector. It is true until a connector appears.
 	warned bool
+	// warnedDisabled is true after the mirror logged that the adapter is not ready.
+	warnedDisabled bool
 }
 
 // New builds a mirror.
@@ -160,6 +167,15 @@ func (m *Mirror) Pass(ctx context.Context) (Summary, error) {
 		return sum, nil
 	}
 	m.warned = false
+	if err := a.Ready(); err != nil {
+		sum.Disabled = true
+		if !m.warnedDisabled {
+			m.warnedDisabled = true
+			m.log.Error("mirror: disabled, because the adapter is not ready", "connector", a.Connector(), "cause", err)
+		}
+		return sum, nil
+	}
+	m.warnedDisabled = false
 	items, err := m.src.Items(ctx)
 	if err != nil {
 		return sum, fmt.Errorf("read the items: %w", err)
@@ -221,7 +237,8 @@ func (m *Mirror) Run(ctx context.Context, interval time.Duration) error {
 	err := intake.Loop(ctx, interval, m.log, "mirror", func(ctx context.Context) error {
 		sum, err := m.Pass(ctx)
 		m.log.Info("mirror pass done", "opened", sum.Opened, "updated", sum.Updated, "closed", sum.Closed,
-			"unchanged", sum.Unchanged, "no_ticket", sum.NoTicket, "no_connector", sum.NoConnector)
+			"unchanged", sum.Unchanged, "no_ticket", sum.NoTicket, "no_connector", sum.NoConnector,
+			"disabled", sum.Disabled)
 		return err
 	})
 	if err != nil {

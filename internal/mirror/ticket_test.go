@@ -4,6 +4,7 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,17 +13,23 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/zeroroot-ai/intake-agent/internal/intake"
 )
 
 // ticketServer is a mock of a ticket server of the connectors repo. It follows the
-// section "Ticket contract" of its README: the tool names, the arguments, the
-// limits, the dedup_key and the result fields.
+// section "Ticket contract" of its README and applies the refusals of the real
+// servers. Each refusal is copied from the file that is named at it, in
+// zeroroot-ai/connectors main at release v0.3.0.
+//
+// The filter dedup_key of search_tickets is not in v0.3.0. The connectors lane adds
+// it to the contract, so this mock serves it as the contract will.
 type ticketServer struct {
 	connectors []string
 	tickets    []*srvTicket
 	calls      []string
+	args       []map[string]any
 	// failAfterCreate makes create_ticket make the ticket and then fail, as a
 	// timeout after the vendor took the call does.
 	failAfterCreate bool
@@ -33,15 +40,17 @@ type ticketServer struct {
 }
 
 type srvTicket struct {
-	id, key, title, description, priority, queue, resolution string
-	labels                                                   []string
-	comments                                                 []string
-	closed                                                   bool
+	id, key, title, description, priority, queue, resolution, createdAt string
+	comments                                                            []string
+	closed                                                              bool
 }
 
 var (
-	srvLabel = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,50}$`)
+	// internal/ticket/ticket.go: dedupFormat. internal/kit/validate.go: Hex32.
 	srvDedup = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@=+-]*$`)
+	srvHex32 = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	// jira/server.go: projectKey.
+	srvProject = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,9}$`)
 )
 
 func (s *ticketServer) Tools(context.Context) ([]intake.Tool, error) {
@@ -66,7 +75,22 @@ func (s *ticketServer) Invoke(_ context.Context, connector, tool string, a map[s
 		return intake.Call{}, s.grantErr
 	}
 	s.calls = append(s.calls, connector+"/"+tool)
-	handlers := map[string]func(map[string]any) (map[string]any, error){
+	s.args = append(s.args, a)
+	// servicenow/server.go:241 and :396: ServiceNow has no labels on an incident,
+	// so a create with labels and a search with a label fail.
+	if connector == "servicenow" && (len(strOrList(a["labels"])) > 0 || str(a, "label") != "") {
+		return intake.Call{}, errors.New("ServiceNow has no labels on an incident. Leave labels out")
+	}
+	// The queue formats: jira/server.go:242 and :566, and checkID in servicenow/server.go.
+	if q := str(a, "queue"); q != "" || (tool == "create_ticket" && connector == "jira") {
+		if connector == "jira" && !srvProject.MatchString(q) {
+			return intake.Call{}, errors.New("queue must be the key of a Jira project, for example SEC")
+		}
+		if connector == "servicenow" && !srvHex32.MatchString(q) {
+			return intake.Call{}, errors.New("check queue: queue has the wrong format")
+		}
+	}
+	handlers := map[string]func(string, map[string]any) (map[string]any, error){
 		"create_ticket":  s.create,
 		"update_ticket":  s.update,
 		"add_comment":    s.comment,
@@ -77,7 +101,7 @@ func (s *ticketServer) Invoke(_ context.Context, connector, tool string, a map[s
 	if !ok {
 		return intake.Call{}, fmt.Errorf("no tool %q", tool)
 	}
-	out, err := h(a)
+	out, err := h(connector, a)
 	if err != nil {
 		return intake.Call{}, err
 	}
@@ -86,23 +110,59 @@ func (s *ticketServer) Invoke(_ context.Context, connector, tool string, a map[s
 
 func str(a map[string]any, k string) string { v, _ := a[k].(string); return v }
 
-func (s *ticketServer) create(a map[string]any) (map[string]any, error) {
-	titleLen := len([]rune(str(a, "title")))
-	if str(a, "title") == "" || titleLen > 255 || str(a, "description") == "" || len(str(a, "description")) > 32000 {
-		return nil, errors.New("create_ticket: bad title or description")
+func strOrList(v any) []string { l, _ := v.([]string); return l }
+
+// checkTitle is CheckString of internal/kit/validate.go: not empty, at most limit
+// bytes, valid UTF-8, no control character.
+func checkTitle(field, v string, limit int) error {
+	switch {
+	case v == "":
+		return fmt.Errorf("%s is required", field)
+	case len(v) > limit:
+		return fmt.Errorf("%s is longer than %d bytes", field, limit)
+	case !utf8.ValidString(v):
+		return fmt.Errorf("%s is not valid UTF-8", field)
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s holds a control character", field)
+		}
+	}
+	return nil
+}
+
+// checkLong is checkLong of internal/ticket/ticket.go: not blank, at most limit
+// bytes, and no control character except a new line, a tab and a carriage return.
+func checkLong(field, v string, limit int) error {
+	switch {
+	case strings.TrimSpace(v) == "":
+		return fmt.Errorf("%s is required", field)
+	case len(v) > limit:
+		return fmt.Errorf("%s is longer than %d bytes", field, limit)
+	}
+	for _, r := range v {
+		if (r < 0x20 && r != '\n' && r != '\t' && r != '\r') || r == 0x7f {
+			return fmt.Errorf("%s holds a control character", field)
+		}
+	}
+	return nil
+}
+
+func (s *ticketServer) create(_ string, a map[string]any) (map[string]any, error) {
+	if err := checkTitle("title", str(a, "title"), 255); err != nil {
+		return nil, err
+	}
+	if err := checkLong("description", str(a, "description"), 32000); err != nil {
+		return nil, err
 	}
 	if p := str(a, "priority"); p != "" && p != "low" && p != "medium" && p != "high" && p != "critical" {
 		return nil, errors.New("create_ticket: bad priority")
 	}
-	labels, _ := a["labels"].([]string)
-	for _, l := range labels {
-		if !srvLabel.MatchString(l) {
-			return nil, fmt.Errorf("create_ticket: bad label %q", l)
-		}
-	}
 	key := str(a, "dedup_key")
-	if key != "" && (len(key) > 100 || !srvDedup.MatchString(key)) {
-		return nil, errors.New("create_ticket: bad dedup_key")
+	if key != "" {
+		if err := checkTitle("dedup_key", key, 100); err != nil || !srvDedup.MatchString(key) {
+			return nil, errors.New("dedup_key has the wrong format")
+		}
 	}
 	for _, t := range s.tickets {
 		if key != "" && t.key == key {
@@ -110,7 +170,8 @@ func (s *ticketServer) create(a map[string]any) (map[string]any, error) {
 		}
 	}
 	t := &srvTicket{id: fmt.Sprintf("T%d", len(s.tickets)+1), key: key, title: str(a, "title"),
-		description: str(a, "description"), priority: str(a, "priority"), queue: str(a, "queue"), labels: labels}
+		description: str(a, "description"), priority: str(a, "priority"), queue: str(a, "queue"),
+		createdAt: fmt.Sprintf("2026-11-21T10:%02d:00Z", len(s.tickets))}
 	s.tickets = append(s.tickets, t)
 	if s.failAfterCreate {
 		s.failAfterCreate = false
@@ -119,7 +180,7 @@ func (s *ticketServer) create(a map[string]any) (map[string]any, error) {
 	return map[string]any{"ticket_id": t.id, "number": "N-" + t.id, "url": "https://t/" + t.id, "existing": false}, nil
 }
 
-func (s *ticketServer) update(a map[string]any) (map[string]any, error) {
+func (s *ticketServer) update(_ string, a map[string]any) (map[string]any, error) {
 	t, err := s.find(str(a, "ticket_id"))
 	if err != nil {
 		return nil, err
@@ -131,6 +192,9 @@ func (s *ticketServer) update(a map[string]any) (map[string]any, error) {
 		return nil, errors.New("update_ticket: give at least one field")
 	}
 	if v := str(a, "title"); v != "" {
+		if err := checkTitle("title", v, 255); err != nil {
+			return nil, err
+		}
 		t.title = v
 	}
 	if v := str(a, "priority"); v != "" {
@@ -139,28 +203,37 @@ func (s *ticketServer) update(a map[string]any) (map[string]any, error) {
 	return map[string]any{"ticket_id": t.id, "action": "updated", "status": "open"}, nil
 }
 
-func (s *ticketServer) comment(a map[string]any) (map[string]any, error) {
+func (s *ticketServer) comment(_ string, a map[string]any) (map[string]any, error) {
 	t, err := s.find(str(a, "ticket_id"))
-	if err != nil || str(a, "body") == "" {
-		return nil, errors.New("add_comment: bad input")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLong("body", str(a, "body"), 32000); err != nil {
+		return nil, err
 	}
 	t.comments = append(t.comments, str(a, "body"))
 	return map[string]any{"ticket_id": t.id, "action": "commented"}, nil
 }
 
-func (s *ticketServer) closeTicket(a map[string]any) (map[string]any, error) {
+func (s *ticketServer) closeTicket(_ string, a map[string]any) (map[string]any, error) {
 	t, err := s.find(str(a, "ticket_id"))
-	if err != nil || str(a, "resolution") == "" {
-		return nil, errors.New("close_ticket: bad input")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLong("resolution", str(a, "resolution"), 32000); err != nil {
+		return nil, err
 	}
 	t.closed, t.resolution = true, str(a, "resolution")
 	return map[string]any{"ticket_id": t.id, "action": "closed", "status": "closed"}, nil
 }
 
-func (s *ticketServer) search(a map[string]any) (map[string]any, error) {
+func (s *ticketServer) search(_ string, a map[string]any) (map[string]any, error) {
+	if k := str(a, "dedup_key"); k != "" && (len(k) > 100 || !srvDedup.MatchString(k)) {
+		return nil, errors.New("dedup_key has the wrong format")
+	}
 	var found []map[string]any
 	for _, t := range s.tickets {
-		if s.searchBlind || (str(a, "label") != "" && !contains(t.labels, str(a, "label"))) {
+		if s.searchBlind || (str(a, "dedup_key") != "" && t.key != str(a, "dedup_key")) {
 			continue
 		}
 		if st := str(a, "status"); (st == "" || st == "open") && t.closed || st == "closed" && !t.closed {
@@ -169,7 +242,8 @@ func (s *ticketServer) search(a map[string]any) (map[string]any, error) {
 		if q := str(a, "queue"); q != "" && t.queue != q {
 			continue
 		}
-		found = append(found, map[string]any{"ticket_id": t.id, "title": t.title, "closed": t.closed})
+		found = append(found, map[string]any{"ticket_id": t.id, "title": t.title, "closed": t.closed,
+			"created_at": t.createdAt})
 	}
 	return map[string]any{"tickets": found, "count": len(found)}, nil
 }
@@ -177,15 +251,6 @@ func (s *ticketServer) search(a map[string]any) (map[string]any, error) {
 func result(v any) intake.Call {
 	b, _ := json.Marshal(v)
 	return intake.Call{JSON: b}
-}
-
-func contains(l []string, v string) bool {
-	for _, x := range l {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 func newTicketMirror(t *testing.T, s *ticketServer, src *fakeSource, queue string) *Mirror {
@@ -206,17 +271,29 @@ func pass(t *testing.T, m *Mirror) Summary {
 	return sum
 }
 
+const (
+	jiraProject = "SEC"
+	snGroup     = "0123456789abcdef0123456789abcdef"
+)
+
+func queueFor(connector string) string {
+	if connector == "jira" {
+		return jiraProject
+	}
+	return ""
+}
+
 func TestTheTicketLifecycleThroughTheContract(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
 	src := &fakeSource{items: []Item{finding("open")}}
-	m := newTicketMirror(t, srv, src, "SEC")
+	m := newTicketMirror(t, srv, src, jiraProject)
 
 	pass(t, m)
 	if len(srv.tickets) != 1 {
 		t.Fatalf("%d tickets, want 1", len(srv.tickets))
 	}
 	tk := srv.tickets[0]
-	if tk.key != "f-1" || !contains(tk.labels, "gibson:f-1") || tk.queue != "SEC" || tk.priority != "high" {
+	if tk.key != "gibson:finding:f-1" || tk.queue != jiraProject || tk.priority != "high" {
 		t.Fatalf("the ticket is not made from the contract: %+v", *tk)
 	}
 	if !strings.HasPrefix(tk.title, "[open] Open port") ||
@@ -248,11 +325,48 @@ func TestTheTicketLifecycleThroughTheContract(t *testing.T) {
 	}
 }
 
+// TestNoCallSendsALabel: ServiceNow refuses a label on a create and on a search. The
+// adapter finds the ticket by its dedup key and sends no label at all.
+func TestNoCallSendsALabel(t *testing.T) {
+	for _, c := range []string{"jira", "servicenow"} {
+		srv := &ticketServer{connectors: []string{c}}
+		src := &fakeSource{items: []Item{finding("open")}}
+		m := newTicketMirror(t, srv, src, queueFor(c))
+		pass(t, m)
+		src.items = []Item{finding("fixing")}
+		pass(t, m)
+		src.items = []Item{finding("verified")}
+		pass(t, m)
+		if len(srv.tickets) != 1 || !srv.tickets[0].closed {
+			t.Fatalf("%s: tickets %d", c, len(srv.tickets))
+		}
+		for i, a := range srv.args {
+			if _, ok := a["labels"]; ok {
+				t.Errorf("%s call %d (%s) sends labels", c, i, srv.calls[i])
+			}
+			if _, ok := a["label"]; ok {
+				t.Errorf("%s call %d (%s) sends a label filter", c, i, srv.calls[i])
+			}
+		}
+		if srv.args[0]["dedup_key"] != "gibson:finding:f-1" {
+			t.Errorf("%s: the first search is %v", c, srv.args[0])
+		}
+	}
+}
+
+func TestServiceNowTakesAnAssignmentGroupAsTheQueue(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"servicenow"}}
+	pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, snGroup))
+	if len(srv.tickets) != 1 || srv.tickets[0].queue != snGroup {
+		t.Fatalf("%+v", srv.tickets)
+	}
+}
+
 func TestARestartOpensNoSecondTicket(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
 	src := &fakeSource{items: []Item{finding("open")}}
-	pass(t, newTicketMirror(t, srv, src, ""))
-	pass(t, newTicketMirror(t, srv, src, "")) // a new process has no memory
+	pass(t, newTicketMirror(t, srv, src, jiraProject))
+	pass(t, newTicketMirror(t, srv, src, jiraProject)) // a new process has no memory
 	if len(srv.tickets) != 1 {
 		t.Fatalf("%d tickets, want 1", len(srv.tickets))
 	}
@@ -261,7 +375,7 @@ func TestARestartOpensNoSecondTicket(t *testing.T) {
 func TestATimeoutAfterTheCreateOpensNoSecondTicket(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}, failAfterCreate: true}
 	src := &fakeSource{items: []Item{finding("open")}}
-	m := newTicketMirror(t, srv, src, "")
+	m := newTicketMirror(t, srv, src, jiraProject)
 	if _, err := m.Pass(context.Background()); err == nil {
 		t.Fatal("want the timeout")
 	}
@@ -288,34 +402,33 @@ func TestADedupKeyHoldsWhenTheSearchDoesNotSeeTheTicket(t *testing.T) {
 	}
 }
 
-func TestEachTicketConnectorIsServedByTheSameAdapterShape(t *testing.T) {
-	for _, c := range []string{"jira", "servicenow"} {
-		srv := &ticketServer{connectors: []string{c}}
-		pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, ""))
-		if len(srv.tickets) != 1 || srv.calls[0] != c+"/search_tickets" {
-			t.Fatalf("%s: tickets %d, calls %v", c, len(srv.tickets), srv.calls)
-		}
-	}
-}
-
 func TestAnIncidentGetsATicketToo(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
 	inc := Item{Kind: KindIncident, ID: "i-1", Title: "Phishing", Severity: "critical", Status: "open"}
 	src := &fakeSource{items: []Item{inc}}
-	m := newTicketMirror(t, srv, src, "")
+	m := newTicketMirror(t, srv, src, jiraProject)
 	pass(t, m)
 	inc.Status = "resolved"
 	src.items = []Item{inc}
 	pass(t, m)
-	if tk := srv.tickets[0]; tk.priority != "critical" || !tk.closed {
+	if tk := srv.tickets[0]; tk.priority != "critical" || !tk.closed || tk.key != "gibson:incident:i-1" {
 		t.Fatalf("%+v", *tk)
+	}
+}
+
+func TestAFindingAndAnIncidentWithOneIDGetTwoTickets(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"jira"}}
+	inc := Item{Kind: KindIncident, ID: "f-1", Title: "Phishing", Severity: "high", Status: "open"}
+	pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open"), inc}}, jiraProject))
+	if len(srv.tickets) != 2 {
+		t.Fatalf("%d tickets, want 2: the kind is in the dedup key", len(srv.tickets))
 	}
 }
 
 func TestAClosedTicketOfAnItemThatOpensAgainIsAnErrorAndNotANewTicket(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
 	src := &fakeSource{items: []Item{finding("open")}}
-	m := newTicketMirror(t, srv, src, "")
+	m := newTicketMirror(t, srv, src, jiraProject)
 	pass(t, m)
 	src.items = []Item{finding("verified")}
 	pass(t, m)
@@ -330,16 +443,157 @@ func TestAClosedTicketOfAnItemThatOpensAgainIsAnErrorAndNotANewTicket(t *testing
 
 func TestAnIDThatTheContractCannotCarryMakesNoCall(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
-	for _, id := range []string{"has space", "has/slash", strings.Repeat("a", 44), ""} {
+	// "gibson:finding:" has 15 bytes, so an id can have 85.
+	for _, id := range []string{"has space", "has/slash", strings.Repeat("a", 86), ""} {
 		it := finding("open")
 		it.ID = id
-		m := newTicketMirror(t, srv, &fakeSource{items: []Item{it}}, "")
+		m := newTicketMirror(t, srv, &fakeSource{items: []Item{it}}, jiraProject)
 		if _, err := m.Pass(context.Background()); err == nil {
 			t.Errorf("id %q: want an error", id)
 		}
 	}
+	for _, c := range srv.calls {
+		if c != "jira/search_tickets" && c != "jira/create_ticket" {
+			continue
+		}
+		t.Fatalf("calls %v, want none", srv.calls)
+	}
+	it := finding("open")
+	it.ID = strings.Repeat("a", 85)
+	pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{it}}, jiraProject))
+}
+
+// TestAStatusThatTheTitleCannotHoldMakesNoWrite: the tag of the title is
+// "[status] ". A status with another character would break it.
+func TestAStatusThatTheTitleCannotHoldMakesNoWrite(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"jira"}}
+	src := &fakeSource{items: []Item{finding("open")}}
+	m := newTicketMirror(t, srv, src, jiraProject)
+	pass(t, m)
+	n := len(srv.calls)
+	for _, st := range []string{"Fixing", "fix ing", "fixing]", "", "fixing\n"} {
+		src.items = []Item{finding(st)}
+		if _, err := m.Pass(context.Background()); err == nil {
+			t.Errorf("status %q: want an error", st)
+		}
+	}
+	for _, c := range srv.calls[n:] {
+		if c != "jira/search_tickets" {
+			t.Fatalf("the adapter wrote %s with a bad status", c)
+		}
+	}
+	bad := finding("Open!")
+	bad.ID = "f-2"
+	m2 := newTicketMirror(t, srv, &fakeSource{items: []Item{bad}}, jiraProject)
+	if _, err := m2.Pass(context.Background()); err == nil {
+		t.Fatal("a create with a bad status must fail")
+	}
+	if len(srv.tickets) != 1 {
+		t.Fatalf("%d tickets, want 1", len(srv.tickets))
+	}
+}
+
+// TestTwoTicketsWithOneKeyGiveTheOldestAndALog.
+func TestTwoTicketsWithOneKeyGiveTheOldestAndALog(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"jira"}}
+	key := "gibson:finding:f-1"
+	srv.tickets = []*srvTicket{
+		{id: "T-new", key: key, queue: jiraProject, title: "[open] x", createdAt: "2026-11-21T12:00:00Z"},
+		{id: "T-old", key: key, queue: jiraProject, title: "[fixing] x", createdAt: "2026-11-20T09:00:00Z"},
+		{id: "T-mid", key: key, queue: jiraProject, title: "[open] x", createdAt: "2026-11-21T01:00:00Z"},
+	}
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(old)
+	tk, found, err := NewTicketAdapter("jira", jiraProject).Find(context.Background(), srv, finding("fixing"))
+	if err != nil || !found || tk.Ref != "T-old" || tk.Status != "fixing" {
+		t.Fatalf("ticket %+v, found %v, err %v", tk, found, err)
+	}
+	if !strings.Contains(logs.String(), "more than one ticket") || !strings.Contains(logs.String(), "T-old") {
+		t.Fatalf("no log of the duplicate: %q", logs.String())
+	}
+}
+
+func TestAJiraConnectorWithNoQueueDisablesTheMirrorWithOneLog(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"jira"}}
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	m, err := New(srv, &fakeSource{items: []Item{finding("open")}}, Adapters(""), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		sum, err := m.Pass(context.Background())
+		if err != nil || !sum.Disabled {
+			t.Fatalf("summary %+v, err %v", sum, err)
+		}
+	}
 	if len(srv.calls) != 0 {
 		t.Fatalf("calls %v, want none", srv.calls)
+	}
+	if n := strings.Count(logs.String(), "INTAKE_TICKET_QUEUE"); n != 1 {
+		t.Fatalf("the cause was logged %d times, want 1:\n%s", n, logs.String())
+	}
+}
+
+func TestAQueueThatTheServerRefusesDisablesTheMirror(t *testing.T) {
+	for c, q := range map[string]string{"jira": "sec", "servicenow": "not-hex"} {
+		srv := &ticketServer{connectors: []string{c}}
+		m := newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, q)
+		if sum, err := m.Pass(context.Background()); err != nil || !sum.Disabled || len(srv.calls) != 0 {
+			t.Fatalf("%s: summary %+v, err %v, calls %v", c, sum, err, srv.calls)
+		}
+	}
+}
+
+// TestAServiceNowTenantNeedsNoQueue: only Jira needs one.
+func TestAServiceNowTenantNeedsNoQueue(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"servicenow"}}
+	sum := pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, ""))
+	if sum.Disabled || len(srv.tickets) != 1 {
+		t.Fatalf("summary %+v, tickets %d", sum, len(srv.tickets))
+	}
+}
+
+// TestTextIsCutByBytesAtACharacterAndHasNoControlCharacter: the servers count bytes,
+// refuse a control character in a title, and refuse invalid UTF-8.
+func TestTextIsCutByBytesAtACharacterAndHasNoControlCharacter(t *testing.T) {
+	srv := &ticketServer{connectors: []string{"jira"}}
+	it := finding("open")
+	it.Title = strings.Repeat("é", 400) + "\x00\x1b[31m\u0085" // 2 and 1 byte characters, control characters
+	it.Severity = "high\x07"
+	it.URL = "https://console.example/f?q=\x01" + strings.Repeat("日", 20000)
+	pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{it}}, jiraProject))
+	if len(srv.tickets) != 1 {
+		t.Fatalf("%d tickets: the server refused the call", len(srv.tickets))
+	}
+	tk := srv.tickets[0]
+	if len(tk.title) > 255 || !utf8.ValidString(tk.title) {
+		t.Fatalf("title %d bytes", len(tk.title))
+	}
+	if len(tk.description) > 32000 || !utf8.ValidString(tk.description) {
+		t.Fatalf("title %d bytes, description %d bytes", len(tk.title), len(tk.description))
+	}
+	// Three bytes characters cut in the description: no half character.
+	if strings.ContainsRune(tk.description, utf8.RuneError) {
+		t.Fatal("the description has a cut character")
+	}
+	// A title of three byte characters is cut at a character too.
+	it2 := finding("open")
+	it2.ID = "f-2"
+	it2.Title = strings.Repeat("日", 200)
+	pass(t, newTicketMirror(t, srv, &fakeSource{items: []Item{it2}}, jiraProject))
+	if len(srv.tickets) != 2 || len(srv.tickets[1].title) > 255 || !utf8.ValidString(srv.tickets[1].title) {
+		t.Fatalf("tickets %d", len(srv.tickets))
+	}
+}
+
+func TestAnInvalidUTF8TitleIsMadeValid(t *testing.T) {
+	it := finding("open")
+	it.Title = "bad \xff\xfe bytes"
+	if got := title(it); !utf8.ValidString(got) {
+		t.Fatalf("title %q is not valid UTF-8", got)
 	}
 }
 
@@ -352,10 +606,6 @@ func TestPriorityAndTitleLimits(t *testing.T) {
 		}
 	}
 	long := finding("open")
-	long.Title = strings.Repeat("é", 400) + "\nline"
-	if n := len([]rune(title(long))); n != maxTitle {
-		t.Fatalf("title has %d characters, want %d", n, maxTitle)
-	}
 	long.Title = "a\n  b\tc"
 	if got := title(long); got != "[open] a b c" {
 		t.Fatalf("title = %q", got)
@@ -364,7 +614,7 @@ func TestPriorityAndTitleLimits(t *testing.T) {
 
 func TestAGrantRefusalKeepsItsChainThroughTheAdapter(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}, grantErr: fmt.Errorf("daemon: %w", intake.ErrGrant)}
-	m := newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, "")
+	m := newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, jiraProject)
 	if _, err := m.Pass(context.Background()); !errors.Is(err, intake.ErrGrant) {
 		t.Fatalf("err = %v", err)
 	}

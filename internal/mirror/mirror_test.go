@@ -42,6 +42,8 @@ func newTool() *fakeTicketTool {
 
 func (f *fakeTicketTool) Connector() string { return f.connector }
 
+func (f *fakeTicketTool) Ready() error { return nil }
+
 func (f *fakeTicketTool) Find(_ context.Context, _ intake.Caller, it Item) (Ticket, bool, error) {
 	if f.findErr != nil {
 		return Ticket{}, false, f.findErr
