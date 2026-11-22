@@ -6,8 +6,8 @@
 # This file only shrinks. Adding an entry means accepting a declaration
 # nothing reads, so put the reason on a # line above it.
 #
-# measured 2026-11-22: 1 of 185 declarations across 18 packages and 22 files
+# measured 2026-11-22: 1 of 182 declarations across 18 packages and 20 files
 
-# RoundTrip satisfies http.RoundTripper. The http.Client calls it through the
+# SignPath satisfies a2ainbound.PathSigner. The SDK client calls it through the
 # interface, which the read counter does not see.
-method sender.signingTransport.RoundTrip	# internal/sender/inbound.go:77
+method sender.grantSigner.SignPath	# internal/sender/sender.go:157

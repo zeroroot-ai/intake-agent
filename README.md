@@ -250,6 +250,10 @@ agent (gibson#1367).
 - The server has a read, a write and an idle time limit. The write limit covers
   the read of the body, the send and the answer. A stop waits for a request in
   flight, up to the write limit.
+- Grace period. The write limit and the stop wait are 75 seconds
+  (`shutdownTimeout` in `cmd/webhook-sender/main.go`). The pod of the sender needs
+  `terminationGracePeriodSeconds` of at least 75. The Kubernetes default is 30
+  seconds, and it would kill a send that Gibson already took.
 - The store of event ids is in the memory of one process. It holds at most 10000
   ids. When it is full, the sender answers `503`. It protects one replica. Two
   replicas, or a restart inside the window, can take a repeated event. Run one
@@ -276,18 +280,17 @@ agent (gibson#1367).
 The daemon gets no new HTTP intake path. The sender uses the inbound A2A
 endpoint that gibson#1367 built, through the Edge, as any outside A2A client does.
 The sender needs a whole message, with a data part, a message id and metadata.
-The send call of the Go SDK takes text only. Until `Client.Send` of
-zeroroot-ai/sdk#375 is released, the sender has a thin client
-(`internal/sender/inbound.go`). It switches to the SDK after that release, and
-the thin client is deleted.
+It sends it with `Client.Send` of `a2ainbound` in the Go SDK (v0.214.0 and later).
+The sender wraps the signer, so that a signer error counts as "no grant" and
+frees the event id.
 
 **Dependency on gibson.** Gibson main builds the input of a mission from the
 text parts of an A2A message only (`a2a_inbound_runs.go`, `a2aserver/handler.go`).
 It drops a data part. So today the mission gets the fixed note and not the
-alert. A gibson change must pass the `webhook` data part to the mission as typed,
-untrusted task data. The tests of this repo assert the current contract
-(`TestTheMissionInputOfGibsonMainHasNoWebhookData`). Update that test when gibson
-changes.
+alert. The gibson change that passes the `webhook` data part to the mission as
+typed, untrusted task data is zeroroot-ai/gibson#1611. The tests of this repo
+assert the current contract (`TestTheMissionInputOfGibsonMainHasNoWebhookData`).
+Update that test when gibson changes.
 
 The event id and the source have only `A-Z a-z 0-9 . _ -`, so the message id
 `webhook:<source>:<id>` has one reading. It is for a planned dedup in gibson,

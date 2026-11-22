@@ -39,6 +39,8 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+
+	"github.com/zeroroot-ai/sdk/a2ainbound"
 )
 
 const (
@@ -61,10 +63,10 @@ const (
 	DefaultMaxBody int64 = 1 << 20
 )
 
-// Originator sends one message to a published Gibson agent. *Inbound is an
-// Originator.
+// Originator sends one whole message to a published Gibson agent.
+// *a2ainbound.Client is an Originator.
 type Originator interface {
-	SendMessage(ctx context.Context, agent string, msg *a2a.Message) (*a2a.Task, error)
+	Send(ctx context.Context, agent string, msg *a2a.Message) (*a2a.Task, error)
 }
 
 // Config configures a Sender.
@@ -143,6 +145,36 @@ func (s *seenStore) release(id string) {
 	s.mu.Lock()
 	delete(s.ids, id)
 	s.mu.Unlock()
+}
+
+// ErrNoGrant means that the signer gave no grant. No byte went to Gibson, so the
+// sender frees the event id.
+var ErrNoGrant = errors.New("sender: no grant for the request")
+
+// grantSigner marks each error of a signer with ErrNoGrant.
+type grantSigner struct{ next a2ainbound.PathSigner }
+
+func (g grantSigner) SignPath(path string) (string, error) {
+	token, err := g.next.SignPath(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrNoGrant, err)
+	}
+	return token, nil
+}
+
+// NewClient returns the A2A client of the sender. It is the client of the Go SDK,
+// with a signer that marks a signer error with ErrNoGrant. transport is optional.
+func NewClient(baseURL string, signer a2ainbound.PathSigner, transport http.RoundTripper) (*a2ainbound.Client, error) {
+	if signer == nil {
+		return nil, errors.New("sender: a signer is required")
+	}
+	c, err := a2ainbound.NewClient(a2ainbound.Config{
+		BaseURL: baseURL, Signer: grantSigner{signer}, Transport: transport,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sender: %w", err)
+	}
+	return c, nil
 }
 
 // idPattern is the charset of an event id and of a source name. It has no ":",
@@ -271,7 +303,7 @@ func (s *Sender) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request, Gibson may have taken the message already, so the sender goes on.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.SendTimeout)
 	defer cancel()
-	task, err := s.origin.SendMessage(ctx, s.cfg.Agent, s.message(id, body))
+	task, err := s.origin.Send(ctx, s.cfg.Agent, s.message(id, body))
 	if err != nil {
 		// The cause can name the platform. It stays in the log.
 		s.log.Error("sender: send failed", "agent", s.cfg.Agent, "id", id, "err", err)

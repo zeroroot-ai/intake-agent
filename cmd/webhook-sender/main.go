@@ -86,7 +86,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 	if err := identity.Register(ctx); err != nil {
 		return fmt.Errorf("enroll the identity: %w", err)
 	}
-	client, err := sender.NewInbound(platform, identity, nil)
+	client, err := sender.NewClient(platform, identity, nil)
 	if err != nil {
 		return fmt.Errorf("make the A2A client: %w", err)
 	}
