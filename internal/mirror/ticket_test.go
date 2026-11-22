@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -21,10 +22,11 @@ import (
 // ticketServer is a mock of a ticket server of the connectors repo. It follows the
 // section "Ticket contract" of its README and applies the refusals of the real
 // servers. Each refusal is copied from the file that is named at it, in
-// zeroroot-ai/connectors main at release v0.3.0.
+// zeroroot-ai/connectors at release v0.4.0.
 //
-// The filter dedup_key of search_tickets is not in v0.3.0. The connectors lane adds
-// it to the contract, so this mock serves it as the contract will.
+// The search follows internal/ticket/ticket.go (SearchInput.DedupKey, StatusOf), and
+// jira/server.go and servicenow/server.go (the dedup_key condition) of v0.4.0. A
+// search by dedup_key gives the tickets oldest first, and the status defaults to any.
 type ticketServer struct {
 	connectors []string
 	tickets    []*srvTicket
@@ -231,12 +233,19 @@ func (s *ticketServer) search(_ string, a map[string]any) (map[string]any, error
 	if k := str(a, "dedup_key"); k != "" && (len(k) > 100 || !srvDedup.MatchString(k)) {
 		return nil, errors.New("dedup_key has the wrong format")
 	}
+	// StatusOf of internal/ticket/ticket.go: a search by dedup_key defaults to any.
+	status := str(a, "status")
+	if status == "" && str(a, "dedup_key") != "" {
+		status = "any"
+	}
 	var found []map[string]any
-	for _, t := range s.tickets {
+	tickets := append([]*srvTicket(nil), s.tickets...)
+	sort.SliceStable(tickets, func(i, j int) bool { return tickets[i].createdAt < tickets[j].createdAt })
+	for _, t := range tickets {
 		if s.searchBlind || (str(a, "dedup_key") != "" && t.key != str(a, "dedup_key")) {
 			continue
 		}
-		if st := str(a, "status"); (st == "" || st == "open") && t.closed || st == "closed" && !t.closed {
+		if st := status; (st == "" || st == "open") && t.closed || st == "closed" && !t.closed {
 			continue
 		}
 		if q := str(a, "queue"); q != "" && t.queue != q {
@@ -618,5 +627,16 @@ func TestAGrantRefusalKeepsItsChainThroughTheAdapter(t *testing.T) {
 	m := newTicketMirror(t, srv, &fakeSource{items: []Item{finding("open")}}, jiraProject)
 	if _, err := m.Pass(context.Background()); !errors.Is(err, intake.ErrGrant) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestOldestTakesTheEarliestTimeWhateverTheOrder(t *testing.T) {
+	got := oldest([]ticketResult{
+		{TicketID: "b", CreatedAt: "2026-11-21T12:00:00Z"},
+		{TicketID: "a", CreatedAt: "2026-11-20T09:00:00Z"},
+		{TicketID: "c", CreatedAt: "bad time"},
+	})
+	if got.TicketID != "a" {
+		t.Fatalf("got %s, want a", got.TicketID)
 	}
 }

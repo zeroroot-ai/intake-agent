@@ -140,8 +140,8 @@ These points need a change that is not in this repository.
 ### Ticket and paging adapters
 
 The adapters call our own servers of https://github.com/zeroroot-ai/connectors
-(release v0.3.0). The tool names, the arguments and the results are from its
-README, section "Ticket contract", and from `pagerduty/README.md` of that repo.
+(release v0.4.0 or later). The tool names, the arguments and the results are from
+its README, section "Ticket contract", and from `pagerduty/README.md` of that repo.
 They are not from a vendor MCP server, whose tool arguments are not published.
 
 | Connector (class) | Adapter | Tools |
@@ -155,10 +155,11 @@ They are not from a vendor MCP server, whose tool arguments are not published.
   ServiceNow refuses one. It finds the ticket with `search_tickets` and its
   `dedup_key` filter. An id that the key cannot carry (more than 85 characters, or
   a character outside `A-Z a-z 0-9 . _ : -`) is an error and makes no call.
-- **Dependency on connectors.** The `dedup_key` filter of `search_tickets` is in
-  the contract that the connectors lane adds. It is not in v0.3.0. Until that
-  release ships, a server refuses the filter, and the mirror fails its search with
-  the message of the server.
+- **Dependency on connectors.** The mirror needs connectors v0.4.0 or later. That
+  release has the `dedup_key` filter of `search_tickets` (zeroroot-ai/connectors#25).
+  The result is oldest first, and the status defaults to `any`. A server of an
+  older release refuses the filter, and the mirror fails its search with the
+  message of the server.
 - When a search gives two tickets for one key, the adapter takes the oldest by
   `created_at` and logs it.
 - **`INTAKE_TICKET_QUEUE` is required for Jira.** It is the project key, for
@@ -185,7 +186,7 @@ They are not from a vendor MCP server, whose tool arguments are not published.
 - The contract says that two calls at the same time can still make two tickets.
   One agent runs one pass at a time.
 - The tests use mocks that apply the refusals of the real servers. Each refusal is
-  copied from a file of zeroroot-ai/connectors at v0.3.0, and the file is named in
+  copied from a file of zeroroot-ai/connectors at v0.4.0, and the file is named in
   a comment. No test ran against a live Jira, ServiceNow or PagerDuty.
 
 ## Why the mirror and the pager are loops of this agent

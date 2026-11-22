@@ -44,9 +44,9 @@ const (
 // the one handle that both servers keep: a label on Jira, correlation_id on
 // ServiceNow. The contract filter dedup_key of search_tickets finds it.
 //
-// CONTRACT NOTE: search_tickets with a dedup_key filter is in the contract that
-// the connectors lane adds. It is not in connectors v0.3.0. Until that release
-// ships, a server refuses the filter, and Find fails with its message.
+// The mirror needs connectors v0.4.0 or later. That release has the dedup_key
+// filter of search_tickets (zeroroot-ai/connectors#25). An older server refuses
+// the filter, and Find fails with its message.
 const keyPrefix = "gibson:"
 
 // dedupFormat is the format of a dedup key. Source: internal/ticket/ticket.go.
