@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/zeroroot-ai/intake-agent/internal/sender"
-	"github.com/zeroroot-ai/sdk/a2ainbound"
 	"github.com/zeroroot-ai/sdk/capabilitygrant"
 )
 
@@ -60,6 +59,16 @@ func run(ctx context.Context, getenv func(string) string) error {
 	if platform == "" {
 		return fmt.Errorf("%s is not set", envPlatformURL)
 	}
+	cfg := sender.Config{
+		Agent:           getenv(envAgent),
+		Source:          getenv(envSource),
+		Secret:          []byte(getenv(envSecret)),
+		SignatureHeader: getenv(envHeader),
+	}
+	// A bad setting stops the start before the enrollment.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("settings: %w", err)
+	}
 	// The first start reads GIBSON_BOOTSTRAP_TOKEN. A later start signs with the
 	// host key on disk. When the enrollment fails, the sender does not listen,
 	// so it never takes a webhook that it cannot send.
@@ -77,16 +86,11 @@ func run(ctx context.Context, getenv func(string) string) error {
 	if err := identity.Register(ctx); err != nil {
 		return fmt.Errorf("enroll the identity: %w", err)
 	}
-	client, err := a2ainbound.NewClient(a2ainbound.Config{BaseURL: platform, Signer: identity})
+	client, err := sender.NewInbound(platform, identity, nil)
 	if err != nil {
 		return fmt.Errorf("make the A2A client: %w", err)
 	}
-	s, err := sender.New(client, sender.Config{
-		Agent:           getenv(envAgent),
-		Source:          getenv(envSource),
-		Secret:          []byte(getenv(envSecret)),
-		SignatureHeader: getenv(envHeader),
-	}, slog.Default())
+	s, err := sender.New(client, cfg, slog.Default())
 	if err != nil {
 		return fmt.Errorf("sender: %w", err)
 	}
@@ -98,7 +102,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 	if addr == "" {
 		addr = ":8080"
 	}
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := newServer(addr, mux)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	slog.Info("webhook-sender started", "version", Version, "listen", addr)
@@ -112,5 +116,18 @@ func run(ctx context.Context, getenv func(string) string) error {
 			return fmt.Errorf("shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+// newServer builds the HTTP server with its time limits. A slow client cannot
+// hold a connection open, and a send to Gibson ends before the write limit.
+func newServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      sender.DefaultSendTimeout + 15*time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 }

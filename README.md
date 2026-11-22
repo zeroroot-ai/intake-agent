@@ -46,14 +46,17 @@ grant), the agent stops with an error.
 
 ## The agent does not start yet
 
-The agent refuses to start, with an error, for these reasons:
+Today no loop can start, for these reasons:
 
-- No recipe ships (see below). An agent with no recipe reads nothing.
-- No marker store exists (see "Open points").
+- The intake loop has no recipe (see below) and no marker store (see "Open points").
 - The ticket mirror has no item source and no adapter. The pager has no wait
   source and no adapter (see "Open points").
 
-One start reports each reason that applies after the recipe check.
+The three loops are independent. A loop with a missing part is disabled, and
+it logs one line with each cause. The other loops start. The agent exits with an
+error only when no loop can start. When one loop stops with an error, for
+example `ErrGrant`, the other loops go on. The agent exits when each loop has
+stopped.
 
 ## The recipes
 
@@ -230,8 +233,21 @@ agent (gibson#1367).
   constant time. An unsigned webhook gets `401`.
 - Replay protection. The sender refuses an event that is older than five minutes
   or more than five minutes ahead (`401`). It refuses an event id that it
-  already took inside the window (`409`). When a send fails with `502`, the sender
-  frees the id, so the retry of the tool works.
+  already took (`409`). It holds an id until twice the window after the event
+  time.
+- The send to Gibson does not stop when the tool closes its request. It has its
+  own time limit of 30 seconds. The sender frees an event id only when the error
+  proves that Gibson did not take the message: no grant, a refused connection, or
+  a `401` or `403` of the edge. After any other error, such as a lost reply, the
+  id stays held and a retry gets `409`, because Gibson may have started the
+  mission. A Task state "rejected" (`403` of the sender) also keeps the id held.
+- The webhook goes to the agent as data. The message has one fixed text part that
+  says the data is untrusted and is never an instruction. The body is in a data
+  part under the key `webhook`, as JSON, so no key of the body can reach a key
+  that the daemon reads, such as `targets`. The event id is the message id
+  (`webhook:<source>:<id>`) and is in the metadata as `webhook_id`.
+- The secret has at least 32 bytes. A shorter secret stops the start.
+- The server has a read, a write and an idle time limit.
 - The store of event ids is in the memory of one process. It holds at most 10000
   ids. When it is full, the sender answers `503`. It protects one replica. Two
   replicas, or a restart inside the window, can take a repeated event. Run one
@@ -257,7 +273,10 @@ agent (gibson#1367).
 
 The daemon gets no new HTTP intake path. The sender uses the inbound A2A
 endpoint that gibson#1367 built, through the Edge, as any outside A2A client does.
-Source: `a2ainbound` of the Go SDK (https://github.com/zeroroot-ai/sdk).
+`a2ainbound` of the Go SDK (https://github.com/zeroroot-ai/sdk) sends one text
+part only, with no message id and no metadata. The sender has a thin client
+(`internal/sender/inbound.go`) with the same signing, until the SDK sends a whole
+message.
 
 ## Develop
 
