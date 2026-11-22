@@ -19,7 +19,9 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-    -ldflags="-s -w -X main.Version=${VERSION}" -o /out/intake-agent .
+    -ldflags="-s -w -X main.Version=${VERSION}" -o /out/intake-agent . \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags="-s -w -X main.Version=${VERSION}" -o /out/webhook-sender ./cmd/webhook-sender
 
 # Stage 2: runtime — distroless, non-root.
 #
@@ -33,9 +35,13 @@ FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55
 # explicitly (`memberCommand: /intake-agent`). Moving this path breaks the
 # launch, so it is part of the contract.
 COPY --from=builder /out/intake-agent /intake-agent
+# The webhook sender is a second binary of the same image (gibson#1451). The
+# catalog runs it with its own command, never as a bank member.
+COPY --from=builder /out/webhook-sender /webhook-sender
 
-# No EXPOSE and no component.yaml: this agent is a bank member (ADR-0119). It
-# serves no port and dials the harness callback service outbound only.
+# No EXPOSE and no component.yaml: the agent is a bank member (ADR-0119). It
+# serves no port and dials the harness callback service outbound only. The
+# webhook sender listens on the address in SENDER_LISTEN.
 
 # The license text travels with the distribution. Apache-2.0 §4(a) and MIT
 # both require the notice to reach every recipient, and a published image is

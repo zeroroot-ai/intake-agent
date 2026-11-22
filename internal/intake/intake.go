@@ -64,12 +64,19 @@ type Handoff struct {
 	Item   recipe.Item
 }
 
-// Daemon is everything the agent needs from the harness.
-type Daemon interface {
+// Caller lists and calls the tools of the enabled connectors. The daemon is the
+// one caller of a connector, so each loop of the agent reaches a connector only
+// through a Caller.
+type Caller interface {
 	// Tools lists the tools of the enabled connectors of the tenant.
 	Tools(ctx context.Context) ([]Tool, error)
 	// Invoke calls one tool of one connector.
 	Invoke(ctx context.Context, connector, tool string, args map[string]any) (Call, error)
+}
+
+// Daemon is everything the agent needs from the harness.
+type Daemon interface {
+	Caller
 	// RaiseFlaw hands over a flaw. The daemon makes it a finding.
 	RaiseFlaw(ctx context.Context, h Handoff) error
 	// RaiseAlert hands over an alert. The daemon makes it an Alert node.
@@ -250,22 +257,36 @@ func advance(m recipe.Marker, it recipe.Item) recipe.Marker {
 // When the daemon refuses the grant (ErrGrant), Run returns the error, because
 // no later pass can pass with that grant.
 func (r *Reader) Run(ctx context.Context, interval time.Duration) error {
+	return Loop(ctx, interval, r.log, "intake", func(ctx context.Context) error {
+		sum, err := r.Pass(ctx)
+		r.log.Info("intake pass done", "failed", sum.Failed, "connectors", sum.Connectors,
+			"flaws", sum.Flaws, "alerts", sum.Alerts, "skipped", sum.Skipped, "invalid", sum.Invalid, "overflow", sum.Overflow,
+			"no_recipe", sum.NoRecipe, "no_tool", sum.NoTool)
+		return err
+	})
+}
+
+// Loop runs pass now and then every interval, until the context ends. It is the
+// one loop of the agent: the intake reader, the ticket mirror and the pager all
+// use it. A pass that fails is logged and the loop goes on. A pass that returns
+// ErrGrant stops the loop with that error, because no later pass can pass with
+// the grant that the daemon refused.
+func Loop(ctx context.Context, interval time.Duration, log *slog.Logger, name string,
+	pass func(context.Context) error,
+) error {
 	if interval <= 0 {
-		return errors.New("intake: the interval must be positive")
+		return fmt.Errorf("%s: the interval must be positive", name)
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		sum, err := r.Pass(ctx)
+		err := pass(ctx)
 		if errors.Is(err, ErrGrant) {
-			return fmt.Errorf("intake pass: %w", err)
+			return fmt.Errorf("%s pass: %w", name, err)
 		}
 		if err != nil {
-			r.log.Error("intake pass", "err", err, "failed", sum.Failed)
+			log.Error(name+" pass failed", "err", err)
 		}
-		r.log.Info("intake pass done", "connectors", sum.Connectors, "flaws", sum.Flaws, "alerts", sum.Alerts,
-			"skipped", sum.Skipped, "invalid", sum.Invalid, "overflow", sum.Overflow,
-			"no_recipe", sum.NoRecipe, "no_tool", sum.NoTool)
 		select {
 		case <-ctx.Done():
 			return nil

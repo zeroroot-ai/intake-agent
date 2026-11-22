@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zeroroot-ai/intake-agent/internal/daemon"
+	"github.com/zeroroot-ai/intake-agent/internal/mirror"
+	"github.com/zeroroot-ai/intake-agent/internal/pager"
 	"github.com/zeroroot-ai/intake-agent/internal/recipe"
 )
 
@@ -38,5 +41,19 @@ func TestRunRefusesToStartWithNoRecipe(t *testing.T) {
 	defer cancel()
 	if err := run(ctx); !errors.Is(err, recipe.ErrNoRecipes) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestNewLoopsNamesEachMissingPart: the agent starts no loop until each part
+// exists, and one start reports every missing part.
+func TestNewLoopsNamesEachMissingPart(t *testing.T) {
+	_, err := newLoops(nil, nil, nil)
+	for _, want := range []error{
+		daemon.ErrNoMarkerStore, daemon.ErrNoItemSource, daemon.ErrNoWaitSource,
+		mirror.ErrNoAdapters, pager.ErrNoAdapters,
+	} {
+		if !errors.Is(err, want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
 	}
 }
