@@ -10,6 +10,4 @@
 
 # SignPath satisfies a2ainbound.PathSigner. The SDK client calls it through the
 # interface, which the read counter does not see.
-# SignPath satisfies a2ainbound.PathSigner. The SDK client calls it through the
-# interface, which the read counter does not see.
 method sender.grantSigner.SignPath	# internal/sender/sender.go:157
