@@ -49,6 +49,9 @@ type fakeGibson struct {
 	mu       sync.Mutex
 	missions []*a2a.Message
 	reject   bool
+	// resetOnRead makes the edge close the connection after it read the request
+	// and before it did any work, as a reset after the dial does.
+	resetOnRead bool
 	// dropReply makes the edge record the message and then close the connection
 	// with no reply, as a lost reply does.
 	dropReply bool
@@ -69,8 +72,14 @@ func newGibson(t *testing.T) *fakeGibson {
 		switch r.Header.Get("x-capability-grant") {
 		case tokenOriginate:
 			g.mu.Lock()
-			drop := g.dropReply
+			drop, reset := g.dropReply, g.resetOnRead
 			g.mu.Unlock()
+			if reset {
+				if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+					_ = conn.Close()
+				}
+				return
+			}
 			if drop {
 				rpc.ServeHTTP(httptest.NewRecorder(), r) // the mission starts
 				if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
@@ -286,14 +295,14 @@ func TestAnOldOrAFutureTimestampIsRefusedEvenWithAGoodSignature(t *testing.T) {
 		"future":            now.Add(DefaultWindow + time.Second),
 		"far in the future": now.Add(24 * time.Hour),
 	} {
-		ts, id := stamp(at), "evt-"+name
+		ts, id := stamp(at), "evt-"+strings.ReplaceAll(name, " ", "-")
 		if rec := post(s, body, ts, id, sign(ts, id, body)); rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", name, rec.Code)
 		}
 	}
 	// The edge of the window is inside it.
 	for name, at := range map[string]time.Time{"oldest": now.Add(-DefaultWindow), "latest": now.Add(DefaultWindow)} {
-		ts, id := stamp(at), "evt-"+name
+		ts, id := stamp(at), "evt-"+strings.ReplaceAll(name, " ", "-")
 		if rec := post(s, body, ts, id, sign(ts, id, body)); rec.Code != http.StatusAccepted {
 			t.Errorf("%s: status %d, want 202", name, rec.Code)
 		}
@@ -556,5 +565,97 @@ func TestAnIDIsHeldUntilTwiceTheWindowAfterTheEvent(t *testing.T) {
 	}
 	if fresh, err := s.seen.reserve(id, edge.Add(DefaultWindow), edge.Add(time.Second)); !fresh || err != nil {
 		t.Fatalf("one second after the edge: fresh = %v, err = %v; want the id free", fresh, err)
+	}
+}
+
+// TestAWriteErrorAfterTheDialKeepsTheIDHeld: the connection opened, then it broke.
+// The sender cannot know what Gibson did, so the id stays held.
+func TestAWriteErrorAfterTheDialKeepsTheIDHeld(t *testing.T) {
+	g := newGibson(t)
+	g.resetOnRead = true
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	body := []byte(`{"alert":"a-7"}`)
+	ts, id := stamp(now), "evt-1"
+	sig := sign(ts, id, body)
+	if rec := post(s, body, ts, id, sig); rec.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502", rec.Code)
+	}
+	g.mu.Lock()
+	g.resetOnRead = false
+	g.mu.Unlock()
+	if rec := post(s, body, ts, id, sig); rec.Code != http.StatusConflict {
+		t.Fatalf("retry: status %d, want 409", rec.Code)
+	}
+}
+
+// missionInput is what Gibson main gives to a mission from an inbound message.
+//
+// DEPENDENCY ON GIBSON. Gibson builds the input of a mission from the text parts
+// of the message only (a2a_inbound_runs.go, a2aserver/handler.go). It drops each
+// data part. This fake does the same, so the tests assert the contract of today.
+// When gibson passes the "webhook" data part to the mission as typed, untrusted
+// task data, change this function and the test below.
+func (g *fakeGibson) missionInput() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []string
+	for _, m := range g.missions {
+		for _, p := range m.Parts {
+			if txt := p.Text(); txt != "" {
+				out = append(out, txt)
+			}
+		}
+	}
+	return out
+}
+
+func TestTheMissionInputOfGibsonMainHasNoWebhookData(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	if rec := postGood(s, []byte(`{"alert":"a-7","host":"10.0.0.9"}`)); rec.Code != http.StatusAccepted {
+		t.Fatalf("status %d", rec.Code)
+	}
+	in := g.missionInput()
+	if len(in) != 1 || in[0] != UntrustedNote {
+		t.Fatalf("the mission input is %q, want the fixed note only", in)
+	}
+	for _, txt := range in {
+		if strings.Contains(txt, "a-7") || strings.Contains(txt, "10.0.0.9") {
+			t.Fatal("the alert reached the mission input as text")
+		}
+	}
+}
+
+func TestTheSourceAndTheIDHaveASafeCharset(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	body := []byte(`{}`)
+	for _, id := range []string{"a:b", "a b", "a/b", "é", strings.Repeat("a", 201)} {
+		ts := stamp(now)
+		if rec := post(s, body, ts, id, sign(ts, id, body)); rec.Code != http.StatusUnauthorized {
+			t.Errorf("id %q: status %d, want 401", id, rec.Code)
+		}
+	}
+	for _, src := range []string{"a:b", "", "a b", strings.Repeat("a", 65)} {
+		if err := (Config{Agent: "a", Source: src, Secret: secret}).Validate(); err == nil {
+			t.Errorf("source %q: want an error", src)
+		}
+	}
+}
+
+func TestANumberOfTheBodyIsKeptAsWritten(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	msg := s.message("evt-1", []byte(`{"id":12345678901234567890,"price":1.50}`))
+	raw, err := json.Marshal(msg.Parts[1].Data())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `12345678901234567890`) || !strings.Contains(string(raw), `1.50`) {
+		t.Fatalf("a number changed: %s", raw)
+	}
+	// A body with two values is not JSON, so it goes as a string.
+	if _, ok := decodeJSON([]byte(`{} {}`)); ok {
+		t.Fatal("two values must not decode")
 	}
 }

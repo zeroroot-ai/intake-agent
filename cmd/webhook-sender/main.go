@@ -110,24 +110,42 @@ func run(ctx context.Context, getenv func(string) string) error {
 	case err := <-errc:
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
-		shut, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shut); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("shutdown: %w", err)
-		}
-		return nil
+		return shutdown(ctx, srv)
 	}
 }
 
+// The time limits of the server.
+const (
+	readTimeout = 30 * time.Second
+	// writeTimeout starts when the server has read the request header. It must
+	// cover the read of the body (readTimeout) and the send to Gibson
+	// (sender.DefaultSendTimeout) and the write of the answer.
+	writeTimeout = readTimeout + sender.DefaultSendTimeout + 15*time.Second
+	// shutdownTimeout is the time that a stop waits for a request in flight. A
+	// send that Gibson already took must end, so it is at least writeTimeout.
+	shutdownTimeout = writeTimeout
+)
+
 // newServer builds the HTTP server with its time limits. A slow client cannot
-// hold a connection open, and a send to Gibson ends before the write limit.
+// hold a connection open, and a request ends before the write limit.
 func newServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      sender.DefaultSendTimeout + 15*time.Second,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
+}
+
+// shutdown stops the server. It waits for each request in flight, up to
+// shutdownTimeout, so that a send to Gibson is not cut.
+func shutdown(ctx context.Context, srv *http.Server) error {
+	shut, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shut); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	return nil
 }

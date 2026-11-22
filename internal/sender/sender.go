@@ -14,11 +14,13 @@
 // starts no mission: Gibson refuses the call, and the sender answers the tool
 // with an error.
 //
-// The text of the webhook is task input only. The sender sends no target, so
-// the webhook can never add a target to the mission.
+// The webhook goes to the agent as data in a data part, beside one fixed text
+// part that says the data is untrusted. The sender sends no target, so the
+// webhook can never add a target to the mission.
 package sender
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -30,6 +32,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +53,6 @@ const (
 	DefaultWindow = 5 * time.Minute
 	// DefaultMaxSeen is the largest number of event ids that the sender holds.
 	DefaultMaxSeen = 10000
-	maxIDLen       = 200
 	// MinSecretLen is the shortest webhook secret that the sender accepts.
 	MinSecretLen = 32
 	// DefaultSendTimeout is the longest time that one send to Gibson takes.
@@ -143,14 +145,21 @@ func (s *seenStore) release(id string) {
 	s.mu.Unlock()
 }
 
+// idPattern is the charset of an event id and of a source name. It has no ":",
+// so the message id "webhook:<source>:<id>" has one reading.
+var (
+	idPattern     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
+	sourcePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
 // Validate checks the parts of the configuration that have no default. The
 // binary calls it before it enrolls, so a bad setting stops the start.
 func (c Config) Validate() error {
 	switch {
 	case c.Agent == "":
 		return errors.New("sender: the name of the Gibson agent is required")
-	case c.Source == "":
-		return errors.New("sender: the name of the source tool is required")
+	case !sourcePattern.MatchString(c.Source):
+		return errors.New("sender: the name of the source tool is required, with 1 to 64 of A-Z a-z 0-9 . _ -")
 	case len(c.Secret) < MinSecretLen:
 		return fmt.Errorf("sender: the webhook secret needs at least %d bytes", MinSecretLen)
 	}
@@ -225,7 +234,7 @@ func (s *Sender) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stamp, id := r.Header.Get(s.cfg.TimestampHeader), r.Header.Get(s.cfg.IDHeader)
-	if id == "" || len(id) > maxIDLen || !s.signed(r.Header.Get(s.cfg.SignatureHeader), stamp, id, body) {
+	if !idPattern.MatchString(id) || !s.signed(r.Header.Get(s.cfg.SignatureHeader), stamp, id, body) {
 		s.log.Warn("sender: webhook refused: the signature, the timestamp or the id is missing or wrong",
 			"source", s.cfg.Source)
 		reply(w, http.StatusUnauthorized, map[string]string{"error": "the signature is missing or wrong"})
@@ -324,14 +333,17 @@ const maxData = 64 << 10
 
 // message builds the A2A message. The body goes into a data part and never into
 // a text part. The data sits under the key "webhook", so a key of the body, such
-// as "targets", can never reach a key that the daemon reads. The event id is the
-// message id and is also in the metadata, so that Gibson can drop a copy.
+// as "targets", can never reach a key that the daemon reads.
+//
+// The message id is "webhook:<source>:<id>", and the metadata holds the event id.
+// They are for a planned dedup in Gibson, which does not exist yet. A dedup key
+// must include the tenant, because two tenants can send the same event id.
+// Source and id have no ":", so the message id has one reading.
 func (s *Sender) message(id string, body []byte) *a2a.Message {
-	var value any
 	data := map[string]any{"source": s.cfg.Source, "id": id}
 	if len(body) > maxData {
 		data["body"], data["truncated"] = string(body[:maxData]), true
-	} else if err := json.Unmarshal(body, &value); err == nil {
+	} else if value, ok := decodeJSON(body); ok {
 		data["body"] = value
 	} else {
 		data["body"] = string(body)
@@ -341,6 +353,22 @@ func (s *Sender) message(id string, body []byte) *a2a.Message {
 	msg.ID = "webhook:" + s.cfg.Source + ":" + id
 	msg.Metadata = map[string]any{"webhook_id": id, "webhook_source": s.cfg.Source}
 	return msg
+}
+
+// decodeJSON decodes one JSON value and keeps each number as written. A float64
+// would round an id above 2^53. It reports false when the body is not exactly one
+// JSON value.
+func decodeJSON(body []byte) (any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return v, true
 }
 
 func reply(w http.ResponseWriter, code int, v any) {

@@ -247,14 +247,16 @@ agent (gibson#1367).
   that the daemon reads, such as `targets`. The event id is the message id
   (`webhook:<source>:<id>`) and is in the metadata as `webhook_id`.
 - The secret has at least 32 bytes. A shorter secret stops the start.
-- The server has a read, a write and an idle time limit.
+- The server has a read, a write and an idle time limit. The write limit covers
+  the read of the body, the send and the answer. A stop waits for a request in
+  flight, up to the write limit.
 - The store of event ids is in the memory of one process. It holds at most 10000
   ids. When it is full, the sender answers `503`. It protects one replica. Two
   replicas, or a restart inside the window, can take a repeated event. Run one
   replica until a shared store exists.
 - Other signature schemes come with each vendor recipe (gibson#1561). This
   sender has one scheme.
-- The text of the webhook is task input. The sender sends no target, so a
+- The sender sends no target, so a
   webhook cannot add a target.
 - When the enrollment fails, the sender does not listen. When Gibson refuses the
   sender later, the sender answers `502` and no mission starts. When Gibson
@@ -273,10 +275,23 @@ agent (gibson#1367).
 
 The daemon gets no new HTTP intake path. The sender uses the inbound A2A
 endpoint that gibson#1367 built, through the Edge, as any outside A2A client does.
-`a2ainbound` of the Go SDK (https://github.com/zeroroot-ai/sdk) sends one text
-part only, with no message id and no metadata. The sender has a thin client
-(`internal/sender/inbound.go`) with the same signing, until the SDK sends a whole
-message.
+The sender needs a whole message, with a data part, a message id and metadata.
+The send call of the Go SDK takes text only. Until `Client.Send` of
+zeroroot-ai/sdk#375 is released, the sender has a thin client
+(`internal/sender/inbound.go`). It switches to the SDK after that release, and
+the thin client is deleted.
+
+**Dependency on gibson.** Gibson main builds the input of a mission from the
+text parts of an A2A message only (`a2a_inbound_runs.go`, `a2aserver/handler.go`).
+It drops a data part. So today the mission gets the fixed note and not the
+alert. A gibson change must pass the `webhook` data part to the mission as typed,
+untrusted task data. The tests of this repo assert the current contract
+(`TestTheMissionInputOfGibsonMainHasNoWebhookData`). Update that test when gibson
+changes.
+
+The event id and the source have only `A-Z a-z 0-9 . _ -`, so the message id
+`webhook:<source>:<id>` has one reading. It is for a planned dedup in gibson,
+which does not exist. A dedup key must include the tenant.
 
 ## Develop
 
