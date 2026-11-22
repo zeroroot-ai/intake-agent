@@ -84,11 +84,14 @@ type Ticket struct {
 }
 
 // Adapter writes tickets in one ticket connector. It calls the tools of the
-// connector through the Caller and reads each tool name, argument and result
-// shape from a vendor document. README.md lists them.
+// connector through the Caller. The tool names, the arguments and the results
+// are the ticket contract of zeroroot-ai/connectors.
 type Adapter interface {
 	// Connector is the catalog id of the ticket connector.
 	Connector() string
+	// Ready reports why the adapter cannot work, for example a setting that is
+	// missing. The mirror then writes nothing and logs the cause one time.
+	Ready() error
 	// Find returns the ticket of the item. The bool is false when none exists.
 	Find(ctx context.Context, c intake.Caller, it Item) (Ticket, bool, error)
 	// Open opens one ticket for the item, with its severity and its link.
@@ -99,21 +102,12 @@ type Adapter interface {
 	Close(ctx context.Context, c intake.Caller, t Ticket, it Item) error
 }
 
-// Adapters returns the adapters that ship with the agent. The list is empty on
-// purpose: no vendor document that was read gives the arguments and the result
-// of the ticket tools. README.md lists what is missing for each connector.
-func Adapters() []Adapter { return nil }
-
-// ErrNoAdapters is the refusal of Shipped.
-var ErrNoAdapters = errors.New("mirror: no adapter ships, so the mirror has no ticket connector to write")
-
-// Shipped returns the adapters that ship. It fails when none ships.
-func Shipped() ([]Adapter, error) {
-	a := Adapters()
-	if len(a) == 0 {
-		return nil, ErrNoAdapters
-	}
-	return a, nil
+// Adapters returns the adapters that ship. Jira and ServiceNow share the ticket
+// contract of the connectors repo, so both use one adapter shape. queue is the
+// project key on Jira and the id of the assignment group on ServiceNow. It can be
+// empty.
+func Adapters(queue string) []Adapter {
+	return []Adapter{NewTicketAdapter("jira", queue), NewTicketAdapter("servicenow", queue)}
 }
 
 // Summary is what one pass did.
@@ -127,6 +121,8 @@ type Summary struct {
 	NoTicket int
 	// NoConnector is true when the tenant has no ticket connector.
 	NoConnector bool
+	// Disabled is true when the adapter of the connector is not ready.
+	Disabled bool
 }
 
 // Mirror runs the passes.
@@ -138,6 +134,8 @@ type Mirror struct {
 	// warned is true after the mirror logged that the tenant has no ticket
 	// connector. It is true until a connector appears.
 	warned bool
+	// warnedDisabled is true after the mirror logged that the adapter is not ready.
+	warnedDisabled bool
 }
 
 // New builds a mirror.
@@ -169,6 +167,15 @@ func (m *Mirror) Pass(ctx context.Context) (Summary, error) {
 		return sum, nil
 	}
 	m.warned = false
+	if err := a.Ready(); err != nil {
+		sum.Disabled = true
+		if !m.warnedDisabled {
+			m.warnedDisabled = true
+			m.log.Error("mirror: disabled, because the adapter is not ready", "connector", a.Connector(), "cause", err)
+		}
+		return sum, nil
+	}
+	m.warnedDisabled = false
 	items, err := m.src.Items(ctx)
 	if err != nil {
 		return sum, fmt.Errorf("read the items: %w", err)
@@ -230,7 +237,8 @@ func (m *Mirror) Run(ctx context.Context, interval time.Duration) error {
 	err := intake.Loop(ctx, interval, m.log, "mirror", func(ctx context.Context) error {
 		sum, err := m.Pass(ctx)
 		m.log.Info("mirror pass done", "opened", sum.Opened, "updated", sum.Updated, "closed", sum.Closed,
-			"unchanged", sum.Unchanged, "no_ticket", sum.NoTicket, "no_connector", sum.NoConnector)
+			"unchanged", sum.Unchanged, "no_ticket", sum.NoTicket, "no_connector", sum.NoConnector,
+			"disabled", sum.Disabled)
 		return err
 	})
 	if err != nil {

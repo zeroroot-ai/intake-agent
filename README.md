@@ -49,8 +49,8 @@ grant), the agent stops with an error.
 Today no loop can start, for these reasons:
 
 - The intake loop has no recipe (see below) and no marker store (see "Open points").
-- The ticket mirror has no item source and no adapter. The pager has no wait
-  source and no adapter (see "Open points").
+- The ticket mirror has no item source. The pager has no wait source (see
+  "Open points"). Their adapters ship (see "Ticket and paging adapters").
 
 The three loops are independent. A loop with a missing part is disabled, and
 it logs one line with each cause. The other loops start. The agent exits with an
@@ -128,11 +128,6 @@ These points need a change that is not in this repository.
     the default limit of four hours (`pager.DefaultLimit`).
   - Until these exist, `daemon.NewItemSource` and `daemon.NewWaitSource` refuse,
     and the agent does not start.
-- **No ticket adapter and no paging adapter ships.** The rule of the recipes
-  applies: no tool call that nobody verified in a vendor document. The tables
-  below show what is verified and what is missing.
-- **ServiceNow has no catalog manifest.** The mirror has no ServiceNow adapter
-  until the manifest and a vendor document for its tools exist.
 - **The status of an incident.** The mirror closes the ticket of an incident at
   `resolved`. The status names come from the branch `epic/incident-response`.
   Check them when that branch merges.
@@ -142,17 +137,57 @@ These points need a change that is not in this repository.
   `epic/incident-response`. Before that merges, an `Alert` lands as an
   `Observation` with its residue (ADR-0112).
 
-### Ticket and paging tools
+### Ticket and paging adapters
 
-I read the published sources for each tool. They do not give what an adapter needs.
-The `tools/list` call of a remote server needs a credential of the tenant, so I
-could not read the schemas there.
+The adapters call our own servers of https://github.com/zeroroot-ai/connectors
+(release v0.4.0 or later). The tool names, the arguments and the results are from
+its README, section "Ticket contract", and from `pagerduty/README.md` of that repo.
+They are not from a vendor MCP server, whose tool arguments are not published.
 
-| Connector (class) | What the vendor publishes | What is missing |
+| Connector (class) | Adapter | Tools |
 |---|---|---|
-| `jira` (ticket) | The tool names in https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/. The arguments of `createJiraIssue` (`cloudId`, `projectKey`, `issueType`, `summary`, `description`, `priority`) and of `searchJiraIssuesUsingJql` (`cloudId`, `jql`, `fields`, `maxResults`), in the skills of https://github.com/atlassian/atlassian-mcp-server (`skills/triage-issue/SKILL.md`). A create result with `key` (`skills/spec-to-backlog/SKILL.md`). A non primary tool runs through `execute` with `name`, `cloudId` and `inputs`. | The arguments of `transitionJiraIssue` and `listJiraIssueTransitions`, so no adapter can close a ticket. The result shape of the search. A way to mark a ticket with the item id. |
-| `servicenow` (ticket) | I found no public document or repository of a ServiceNow MCP server. | A vendor server, then the catalog manifest. This belongs to the connectors lane. |
-| `pagerduty` (paging) | The remote server lists tools with actions: `browse_incidents` (list, get, ...) and `manage_incidents` (create, update, add_note, ...) at https://docs.pagerduty.com/ai-automation/advance/pagerduty-mcp-server.md. | The arguments and results of these tools. The open source server https://github.com/PagerDuty/pagerduty-mcp-server has other tools (`list_incidents`, `create_incident`), and its `manage_incidents` is a different tool. Its README says that the hosted server replaces it. The code of that server is not the schema of the remote server. |
+| `jira`, `servicenow` (ticket) | `mirror.TicketAdapter`, one shape for both | `search_tickets`, `create_ticket`, `update_ticket`, `add_comment`, `close_ticket` |
+| `pagerduty` (paging) | `pager.OnCall` | `find_incidents`, `trigger_alert` |
+
+- The dedup key of a ticket is `gibson:<kind>:<id>`, for example
+  `gibson:finding:f-1`. It is the one handle that Jira (a label) and ServiceNow
+  (`correlation_id`) both keep. The adapter sends no label at all, because
+  ServiceNow refuses one. It finds the ticket with `search_tickets` and its
+  `dedup_key` filter. An id that the key cannot carry (more than 85 characters, or
+  a character outside `A-Z a-z 0-9 . _ : -`) is an error and makes no call.
+- **Dependency on connectors.** The mirror needs connectors v0.4.0 or later. That
+  release has the `dedup_key` filter of `search_tickets` (zeroroot-ai/connectors#25).
+  The result is oldest first, and the status defaults to `any`. A server of an
+  older release refuses the filter, and the mirror fails its search with the
+  message of the server.
+- When a search gives two tickets for one key, the adapter takes the oldest by
+  `created_at` and logs it.
+- **`INTAKE_TICKET_QUEUE` is required for Jira.** It is the project key, for
+  example `SEC` (`^[A-Z][A-Z0-9_]{1,9}$`). Jira refuses a create with no project.
+  When it is missing or wrong, the mirror writes nothing and logs the cause one
+  time. For ServiceNow it is optional, and it is the 32 character id of the
+  assignment group.
+- The ticket title starts with the last status, for example `[fixing] Open port`.
+  The contract has no call to change a label, so the title is the record that
+  `update_ticket` can change and `search_tickets` returns. A status that is not a
+  lower case word (`a-z` and `_`) is an error before any write.
+- A status change adds a comment, then changes the title. The contract has no tool
+  to reopen a ticket, so an item that leaves `verified` gives an error.
+- The servers count bytes and refuse a control character in a title and in a
+  summary. The adapter strips each control character, makes the text valid UTF-8,
+  and cuts at a character to at most 255 bytes for a title, 32000 for a
+  description and 1024 for a summary. A value of `custom_details` has at most 500
+  bytes, and an empty value is left out.
+- The dedup key of an alert is the key of the wait. The adapter checks it against
+  the format of the server (at most 255 bytes of `A-Z a-z 0-9 . _ : / @ = + -`)
+  before the call. The pager asks `find_incidents` before it triggers, and a
+  repeat of `trigger_alert` with one key makes one incident. A restart or a
+  timeout so makes no second page.
+- The contract says that two calls at the same time can still make two tickets.
+  One agent runs one pass at a time.
+- The tests use mocks that apply the refusals of the real servers. Each refusal is
+  copied from a file of zeroroot-ai/connectors at v0.4.0, and the file is named in
+  a comment. No test ran against a live Jira, ServiceNow or PagerDuty.
 
 ## Why the mirror and the pager are loops of this agent
 
@@ -192,8 +227,9 @@ nothing in Gibson.
 6. When the item is `verified`, the adapter closes the ticket. An incident closes
    at `resolved`.
 
-The mirror keeps no state. The ticket holds the id of the item and the last
-status that the mirror wrote, so a restart opens no second ticket.
+The mirror keeps no state. The ticket holds the id of the item (a label and the
+dedup key) and the last status that the mirror wrote (the start of the title),
+so a restart or a timeout opens no second ticket.
 
 ## The pager
 

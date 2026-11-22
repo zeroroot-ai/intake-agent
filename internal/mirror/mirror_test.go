@@ -42,6 +42,8 @@ func newTool() *fakeTicketTool {
 
 func (f *fakeTicketTool) Connector() string { return f.connector }
 
+func (f *fakeTicketTool) Ready() error { return nil }
+
 func (f *fakeTicketTool) Find(_ context.Context, _ intake.Caller, it Item) (Ticket, bool, error) {
 	if f.findErr != nil {
 		return Ticket{}, false, f.findErr
@@ -229,12 +231,6 @@ func (f *failOpen) Open(ctx context.Context, c intake.Caller, it Item) (Ticket, 
 		return Ticket{}, errors.New("vendor down")
 	}
 	return f.fakeTicketTool.Open(ctx, c, it)
-}
-
-func TestNoAdapterShips(t *testing.T) {
-	if _, err := Shipped(); !errors.Is(err, ErrNoAdapters) {
-		t.Fatalf("want ErrNoAdapters, got %v", err)
-	}
 }
 
 func TestNewNeedsEachPart(t *testing.T) {
