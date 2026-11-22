@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -63,7 +62,7 @@ func TestNewLoopsNamesEachMissingPart(t *testing.T) {
 	}
 }
 
-func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func quiet() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 type nilDaemon struct{}
 
@@ -130,7 +129,8 @@ func TestTheIntakeReaderStartsWhenItsOwnPartsExist(t *testing.T) {
 	}
 }
 
-// TestAGrantRefusalInOneLoopDoesNotStopTheOthers.
+// TestAGrantRefusalInOneLoopDoesNotStopTheOthers: loop a stops at once with
+// ErrGrant, and loop b still runs to the end of its context.
 func TestAGrantRefusalInOneLoopDoesNotStopTheOthers(t *testing.T) {
 	var after atomic.Int32
 	loops := []loop{
