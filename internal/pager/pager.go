@@ -76,7 +76,7 @@ type Adapter interface {
 
 // Adapters returns the adapters that ship: PagerDuty, through the paging server
 // of zeroroot-ai/connectors.
-func Adapters() []Adapter { return []Adapter{NewPagerDuty()} }
+func Adapters() []Adapter { return []Adapter{NewOnCall()} }
 
 // Summary is what one pass did.
 type Summary struct {
