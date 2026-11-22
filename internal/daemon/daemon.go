@@ -94,8 +94,8 @@ var ErrNoWaitSource = errors.New("daemon: no wait source: " +
 // NewWaitSource returns the source of the pager. It always fails now.
 //
 // ListWaitingOnPerson is a call of the WorldService. Its authz rule admits a
-// user and a service identity, and a member is an agent identity. The wait limit
-// of the tenant has no setting and no API. See README.md, "Open points".
+// user and a service identity, and a member is an agent identity. The tenant has
+// no wait limit setting and no API, so the pager uses DefaultLimit. See README.md, "Open points".
 func NewWaitSource(Wire) (pager.Source, error) { return nil, ErrNoWaitSource }
 
 // Tools lists the tools of the enabled connectors through search_tools.

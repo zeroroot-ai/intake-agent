@@ -11,12 +11,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -26,8 +29,15 @@ import (
 
 var secret = []byte("shared-secret")
 
-func sign(body []byte) string {
+// now is the clock of the tests.
+var now = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+
+func stamp(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+
+// sign signs the timestamp, the id and the body.
+func sign(ts, id string, body []byte) string {
 	m := hmac.New(sha256.New, secret)
+	m.Write([]byte(ts + "." + id + "."))
 	m.Write(body)
 	return "sha256=" + hex.EncodeToString(m.Sum(nil))
 }
@@ -101,7 +111,8 @@ func newSender(t *testing.T, g *fakeGibson, signer a2ainbound.PathSigner) (*Send
 		t.Fatalf("a2a client: %v", err)
 	}
 	var logs bytes.Buffer
-	s, err := New(c, Config{Agent: "incident-response", Source: "mock-edr", Secret: secret},
+	s, err := New(c, Config{Agent: "incident-response", Source: "mock-edr", Secret: secret,
+		Now: func() time.Time { return now }},
 		slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -109,14 +120,26 @@ func newSender(t *testing.T, g *fakeGibson, signer a2ainbound.PathSigner) (*Send
 	return s, &logs
 }
 
-func post(s http.Handler, body []byte, sig string) *httptest.ResponseRecorder {
+// post sends a webhook with the given headers. An empty value sets no header.
+func post(s http.Handler, body []byte, ts, id, sig string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(body))
-	if sig != "" {
-		req.Header.Set(DefaultSignatureHeader, sig)
+	for k, v := range map[string]string{DefaultTimestampHeader: ts, DefaultIDHeader: id, DefaultSignatureHeader: sig} {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
 	}
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	return rec
+}
+
+var eventSeq int
+
+// postGood sends a webhook that is signed, fresh and new.
+func postGood(s http.Handler, body []byte) *httptest.ResponseRecorder {
+	eventSeq++
+	id, ts := fmt.Sprintf("evt-%d", eventSeq), stamp(now)
+	return post(s, body, ts, id, sign(ts, id, body))
 }
 
 func TestAWebhookFromAMockToolStartsOneMission(t *testing.T) {
@@ -124,7 +147,7 @@ func TestAWebhookFromAMockToolStartsOneMission(t *testing.T) {
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	body := []byte(`{"alert":"a-7","severity":"high","host":"10.0.0.9"}`)
 
-	rec := post(s, body, sign(body))
+	rec := postGood(s, body)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
@@ -156,7 +179,7 @@ func TestASenderWithNoGrantStartsNoMission(t *testing.T) {
 			g := newGibson(t)
 			s, _ := newSender(t, g, signer)
 			body := []byte(`{"alert":"a-7"}`)
-			rec := post(s, body, sign(body))
+			rec := postGood(s, body)
 			if rec.Code != http.StatusBadGateway {
 				t.Fatalf("status %d, want 502: %s", rec.Code, rec.Body)
 			}
@@ -171,15 +194,20 @@ func TestAnUnsignedOrWronglySignedWebhookSendsNothing(t *testing.T) {
 	g := newGibson(t)
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	body := []byte(`{"alert":"a-7"}`)
-	other := []byte(`{"alert":"a-8"}`)
-	for name, sig := range map[string]string{
-		"no signature":       "",
-		"wrong body":         sign(other),
-		"no prefix":          strings.TrimPrefix(sign(body), "sha256="),
-		"not hex":            "sha256=zz",
-		"empty after prefix": "sha256=",
+	ts, id := stamp(now), "evt-x"
+	good := sign(ts, id, body)
+	for name, c := range map[string]struct{ ts, id, sig string }{
+		"no signature":       {ts, id, ""},
+		"no timestamp":       {"", id, good},
+		"no id":              {ts, "", good},
+		"wrong body":         {ts, id, sign(ts, id, []byte(`{"alert":"a-8"}`))},
+		"another id":         {ts, "evt-y", good},
+		"another timestamp":  {stamp(now.Add(time.Second)), id, good},
+		"no prefix":          {ts, id, strings.TrimPrefix(good, "sha256=")},
+		"not hex":            {ts, id, "sha256=zz"},
+		"empty after prefix": {ts, id, "sha256="},
 	} {
-		if rec := post(s, body, sig); rec.Code != http.StatusUnauthorized {
+		if rec := post(s, body, c.ts, c.id, c.sig); rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", name, rec.Code)
 		}
 	}
@@ -188,12 +216,110 @@ func TestAnUnsignedOrWronglySignedWebhookSendsNothing(t *testing.T) {
 	}
 }
 
+func TestABodyChangedAfterSigningIsRefused(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	ts, id := stamp(now), "evt-1"
+	sig := sign(ts, id, []byte(`{"host":"10.0.0.9"}`))
+	if rec := post(s, []byte(`{"host":"10.0.0.10"}`), ts, id, sig); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401", rec.Code)
+	}
+	if g.started() != 0 {
+		t.Fatal("a changed body started a mission")
+	}
+}
+
+func TestAnOldOrAFutureTimestampIsRefusedEvenWithAGoodSignature(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	body := []byte(`{"alert":"a-7"}`)
+	for name, at := range map[string]time.Time{
+		"old":               now.Add(-DefaultWindow - time.Second),
+		"far in the past":   now.Add(-24 * time.Hour),
+		"future":            now.Add(DefaultWindow + time.Second),
+		"far in the future": now.Add(24 * time.Hour),
+	} {
+		ts, id := stamp(at), "evt-"+name
+		if rec := post(s, body, ts, id, sign(ts, id, body)); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, rec.Code)
+		}
+	}
+	// The edge of the window is inside it.
+	for name, at := range map[string]time.Time{"oldest": now.Add(-DefaultWindow), "latest": now.Add(DefaultWindow)} {
+		ts, id := stamp(at), "evt-"+name
+		if rec := post(s, body, ts, id, sign(ts, id, body)); rec.Code != http.StatusAccepted {
+			t.Errorf("%s: status %d, want 202", name, rec.Code)
+		}
+	}
+	if g.started() != 2 {
+		t.Fatalf("Gibson started %d missions, want 2", g.started())
+	}
+}
+
+func TestAReplayedEventStartsOneMission(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	body := []byte(`{"alert":"a-7"}`)
+	ts, id := stamp(now), "evt-1"
+	sig := sign(ts, id, body)
+	if rec := post(s, body, ts, id, sig); rec.Code != http.StatusAccepted {
+		t.Fatalf("first: status %d", rec.Code)
+	}
+	for range 2 {
+		if rec := post(s, body, ts, id, sig); rec.Code != http.StatusConflict {
+			t.Fatalf("replay: status %d, want 409", rec.Code)
+		}
+	}
+	if g.started() != 1 {
+		t.Fatalf("Gibson started %d missions, want 1", g.started())
+	}
+}
+
+func TestAnEventThatFailedToSendCanBeRetriedWithTheSameID(t *testing.T) {
+	g := newGibson(t)
+	failing, _ := newSender(t, g, stubSigner{err: errors.New("no grant")})
+	body := []byte(`{"alert":"a-7"}`)
+	ts, id := stamp(now), "evt-1"
+	sig := sign(ts, id, body)
+	if rec := post(failing, body, ts, id, sig); rec.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502", rec.Code)
+	}
+	// The same sender state: swap the originator for one that works.
+	good, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	good.seen = failing.seen
+	if rec := post(good, body, ts, id, sig); rec.Code != http.StatusAccepted {
+		t.Fatalf("retry: status %d, want 202", rec.Code)
+	}
+}
+
+func TestTheStoreOfEventIDsIsBounded(t *testing.T) {
+	g := newGibson(t)
+	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
+	s.seen.max = 2
+	body := []byte(`{}`)
+	codes := make([]int, 0, 3)
+	for _, id := range []string{"a", "b", "c"} {
+		ts := stamp(now)
+		codes = append(codes, post(s, body, ts, id, sign(ts, id, body)).Code)
+	}
+	if codes[0] != 202 || codes[1] != 202 || codes[2] != http.StatusServiceUnavailable {
+		t.Fatalf("codes %v", codes)
+	}
+	// Time passes. The ids of the first two events are not needed any more.
+	later := now.Add(2*DefaultWindow + time.Second)
+	s.cfg.Now = func() time.Time { return later }
+	ts := stamp(later)
+	if rec := post(s, body, ts, "c", sign(ts, "c", body)); rec.Code != http.StatusAccepted {
+		t.Fatalf("after the window: status %d, want 202", rec.Code)
+	}
+}
+
 func TestAMessageThatGibsonRejectsIsA403(t *testing.T) {
 	g := newGibson(t)
 	g.reject = true
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	body := []byte(`{"alert":"a-7"}`)
-	if rec := post(s, body, sign(body)); rec.Code != http.StatusForbidden {
+	if rec := postGood(s, body); rec.Code != http.StatusForbidden {
 		t.Fatalf("status %d, want 403", rec.Code)
 	}
 	if g.started() != 0 {
@@ -206,7 +332,7 @@ func TestABodyOverTheLimitIsRefused(t *testing.T) {
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	s.cfg.MaxBody = 16
 	body := bytes.Repeat([]byte("a"), 64)
-	if rec := post(s, body, sign(body)); rec.Code != http.StatusRequestEntityTooLarge {
+	if rec := postGood(s, body); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status %d, want 413", rec.Code)
 	}
 	if g.started() != 0 {
@@ -218,7 +344,7 @@ func TestABigBodyIsCutInTheMessageAndTheMessageSaysSo(t *testing.T) {
 	g := newGibson(t)
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	body := bytes.Repeat([]byte("a"), maxText+10)
-	if rec := post(s, body, sign(body)); rec.Code != http.StatusAccepted {
+	if rec := postGood(s, body); rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 	text := g.missions[0].Parts[0].Text()

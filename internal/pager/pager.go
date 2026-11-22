@@ -27,6 +27,10 @@ import (
 	"github.com/zeroroot-ai/intake-agent/internal/intake"
 )
 
+// DefaultLimit is the wait limit of a tenant that set none (owner decision,
+// 2026-11-21). A limit that the tenant sets replaces it.
+const DefaultLimit = 4 * time.Hour
+
 // Waiting is one item that waits on a person.
 type Waiting struct {
 	// Kind is destructive_action, merge_refused, next_scan or no_health_signal.
@@ -49,10 +53,11 @@ func Key(w Waiting) string {
 }
 
 // Source is Gibson. It lists the items that wait on a person, and it gives the
-// wait limit that the tenant set.
+// wait limit that the tenant set. The limit is the only setting of the tenant.
 type Source interface {
 	Waiting(ctx context.Context) ([]Waiting, error)
-	// Limit is the wait limit of the tenant. Zero means that the tenant set none.
+	// Limit is the wait limit of the tenant. Zero means that the tenant set none,
+	// and the pager then uses DefaultLimit.
 	Limit(ctx context.Context) (time.Duration, error)
 }
 
@@ -95,9 +100,8 @@ type Summary struct {
 	Already int
 	// NoConnector is true when the tenant has no paging connector.
 	NoConnector bool
-	// NoLimit is true when the tenant set no wait limit. The pager then sends
-	// no page.
-	NoLimit bool
+	// Limit is the wait limit of this pass: the tenant setting, or DefaultLimit.
+	Limit time.Duration
 }
 
 // Pager runs the passes.
@@ -108,9 +112,9 @@ type Pager struct {
 	log      *slog.Logger
 	// sent holds the key of each page that this process sent or found.
 	sent map[string]bool
-	// warnedNoConnector and warnedNoLimit are true after the pager logged that
-	// state. Each is true until the state ends.
-	warnedNoConnector, warnedNoLimit bool
+	// warnedNoConnector is true after the pager logged that the tenant has no
+	// paging connector. It is true until a connector appears.
+	warnedNoConnector bool
 }
 
 // New builds a pager.
@@ -126,7 +130,7 @@ func New(c intake.Caller, src Source, adapters []Adapter, log *slog.Logger) (*Pa
 
 // Pass pages for each wait that is over the limit and has no page. A tenant
 // with no paging connector is not an error: the pass does nothing, and it logs
-// this one time. A tenant with no wait limit gets no page.
+// this one time. A tenant with no wait limit gets DefaultLimit.
 func (p *Pager) Pass(ctx context.Context) (Summary, error) {
 	var sum Summary
 	tools, err := p.caller.Tools(ctx)
@@ -148,14 +152,9 @@ func (p *Pager) Pass(ctx context.Context) (Summary, error) {
 		return sum, fmt.Errorf("read the wait limit: %w", err)
 	}
 	if limit <= 0 {
-		sum.NoLimit = true
-		if !p.warnedNoLimit {
-			p.warnedNoLimit = true
-			p.log.Info("pager: the tenant set no wait limit, so no page is sent")
-		}
-		return sum, nil
+		limit = DefaultLimit
 	}
-	p.warnedNoLimit = false
+	sum.Limit = limit
 	items, err := p.src.Waiting(ctx)
 	if err != nil {
 		return sum, fmt.Errorf("read the waiting items: %w", err)
@@ -222,7 +221,7 @@ func (p *Pager) Run(ctx context.Context, interval time.Duration) error {
 	err := intake.Loop(ctx, interval, p.log, "pager", func(ctx context.Context) error {
 		sum, err := p.Pass(ctx)
 		p.log.Info("pager pass done", "waiting", sum.Waiting, "paged", sum.Paged, "already", sum.Already,
-			"no_connector", sum.NoConnector, "no_limit", sum.NoLimit)
+			"no_connector", sum.NoConnector, "limit", sum.Limit)
 		return err
 	})
 	if err != nil {

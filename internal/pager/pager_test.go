@@ -163,21 +163,31 @@ func TestATenantWithNoPagingConnectorGetsNoErrorAndOneLog(t *testing.T) {
 	}
 }
 
-func TestATenantWithNoLimitGetsNoPage(t *testing.T) {
+func TestDefaultLimitIsFourHours(t *testing.T) {
+	if DefaultLimit != 4*time.Hour {
+		t.Fatalf("DefaultLimit = %s, want 4h", DefaultLimit)
+	}
+}
+
+func TestATenantWithNoLimitGetsTheDefault(t *testing.T) {
 	tool := &fakePaging{keys: map[string]bool{}}
-	src := &fakeSource{items: []Waiting{wait("f-1", 1000*time.Hour)}}
-	p, logs := newPager(t, tool, src, "pagerduty")
-	for range 2 {
-		sum, err := p.Pass(context.Background())
-		if err != nil || !sum.NoLimit {
-			t.Fatalf("summary %+v, err %v", sum, err)
-		}
+	src := &fakeSource{items: []Waiting{wait("short", 3*time.Hour), wait("long", 5*time.Hour)}}
+	p, _ := newPager(t, tool, src, "pagerduty")
+	sum, err := p.Pass(context.Background())
+	if err != nil || sum.Limit != DefaultLimit {
+		t.Fatalf("summary %+v, err %v", sum, err)
 	}
-	if len(tool.pages) != 0 {
-		t.Fatal("the pager paged with no limit")
+	if len(tool.pages) != 1 || tool.pages[0].ID != "long" {
+		t.Fatalf("pages %+v, want one page for the wait of 5h", tool.pages)
 	}
-	if n := strings.Count(logs.String(), "no wait limit"); n != 1 {
-		t.Fatalf("the pager logged %d times, want 1", n)
+}
+
+func TestATenantLimitReplacesTheDefault(t *testing.T) {
+	tool := &fakePaging{keys: map[string]bool{}}
+	src := &fakeSource{limit: time.Hour, items: []Waiting{wait("a", 90*time.Minute)}}
+	p, _ := newPager(t, tool, src, "pagerduty")
+	if sum, err := p.Pass(context.Background()); err != nil || sum.Limit != time.Hour || len(tool.pages) != 1 {
+		t.Fatalf("summary %+v, err %v, pages %d", sum, err, len(tool.pages))
 	}
 }
 

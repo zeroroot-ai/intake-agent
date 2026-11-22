@@ -121,7 +121,8 @@ These points need a change that is not in this repository.
     service identity.
   - `ListWaitingOnPerson` admits a user and a service identity (`allowed_identities: 3`),
     and it is not on the callback service.
-  - The tenant has no wait limit setting.
+  - The tenant has no wait limit setting. Until it exists, every tenant gets
+    the default limit of four hours (`pager.DefaultLimit`).
   - Until these exist, `daemon.NewItemSource` and `daemon.NewWaitSource` refuse,
     and the agent does not start.
 - **No ticket adapter and no paging adapter ships.** The rule of the recipes
@@ -140,11 +141,15 @@ These points need a change that is not in this repository.
 
 ### Ticket and paging tools
 
-| Connector (class) | Verified tool | Vendor document | Missing |
-|---|---|---|---|
-| `jira` (ticket) | `createJiraIssue`, `editJiraIssue`, `transitionJiraIssue`, `addOrEditJiraIssueComment`, `searchJiraIssuesUsingJql`, `listJiraIssueTransitions` | https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/ | The argument names and the result fields. The page lists names and one line each. Run `tools/list` on the server and read one result of each tool. |
-| `servicenow` (ticket) | None. | None. | The catalog manifest and a vendor document. |
-| `pagerduty` (paging) | `create_incident`, `list_incidents`, `manage_incidents` on the open source local server. | https://github.com/PagerDuty/pagerduty-mcp-server/blob/main/docs/tools/incidents.md | The remote server at https://docs.pagerduty.com/developer/mcp-tooling-remote-server says only that `tools/list` gives the tools. Nobody confirmed that it has the tools of the local server. The result fields are not documented. |
+I read the published sources for each tool. They do not give what an adapter needs.
+The `tools/list` call of a remote server needs a credential of the tenant, so I
+could not read the schemas there.
+
+| Connector (class) | What the vendor publishes | What is missing |
+|---|---|---|
+| `jira` (ticket) | The tool names in https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/. The arguments of `createJiraIssue` (`cloudId`, `projectKey`, `issueType`, `summary`, `description`, `priority`) and of `searchJiraIssuesUsingJql` (`cloudId`, `jql`, `fields`, `maxResults`), in the skills of https://github.com/atlassian/atlassian-mcp-server (`skills/triage-issue/SKILL.md`). A create result with `key` (`skills/spec-to-backlog/SKILL.md`). A non primary tool runs through `execute` with `name`, `cloudId` and `inputs`. | The arguments of `transitionJiraIssue` and `listJiraIssueTransitions`, so no adapter can close a ticket. The result shape of the search. A way to mark a ticket with the item id. |
+| `servicenow` (ticket) | I found no public document or repository of a ServiceNow MCP server. | A vendor server, then the catalog manifest. This belongs to the connectors lane. |
+| `pagerduty` (paging) | The remote server lists tools with actions: `browse_incidents` (list, get, ...) and `manage_incidents` (create, update, add_note, ...) at https://docs.pagerduty.com/ai-automation/advance/pagerduty-mcp-server.md. | The arguments and results of these tools. The open source server https://github.com/PagerDuty/pagerduty-mcp-server has other tools (`list_incidents`, `create_incident`), and its `manage_incidents` is a different tool. Its README says that the hosted server replaces it. The code of that server is not the schema of the remote server. |
 
 ## Why the mirror and the pager are loops of this agent
 
@@ -196,7 +201,7 @@ Package `internal/pager`. The items come from `ListWaitingOnPerson`
 2. When the tenant has no paging connector, the pass does nothing. It logs this
    one time. It returns no error.
 3. The pass reads the wait limit that the tenant set. When the tenant set no
-   limit, the pass sends no page and logs this one time.
+   limit, the pass uses the default of four hours (`pager.DefaultLimit`).
 4. For each item that waited longer than the limit, the pass makes the key of the
    wait. The key is the kind, the id and the start time of the wait.
 5. When the pager or the paging tool already holds a page with this key, the pass
@@ -218,10 +223,21 @@ agent (gibson#1367).
 - The sender is an enrolled identity with the ceiling `mission:originate`. A
   tenant admin makes it with `CreateAgentIdentity` and gives it the grant to the
   published definition.
-- The sender checks an HMAC-SHA256 signature of the body in the header
-  `X-Webhook-Signature`, with the value `sha256=<hex>`. It refuses an unsigned
-  webhook. A tool with another signature scheme needs a small proxy that signs
-  as above. The sender has no replay check.
+- The sender checks each webhook. The signature is
+  `sha256=<hex>` of the HMAC-SHA256 of `<timestamp>.<event id>.<body>`, in the
+  header `X-Webhook-Signature`. The timestamp (Unix seconds) is in
+  `X-Webhook-Timestamp`. The event id is in `X-Webhook-Id`. The comparison takes
+  constant time. An unsigned webhook gets `401`.
+- Replay protection. The sender refuses an event that is older than five minutes
+  or more than five minutes ahead (`401`). It refuses an event id that it
+  already took inside the window (`409`). When a send fails with `502`, the sender
+  frees the id, so the retry of the tool works.
+- The store of event ids is in the memory of one process. It holds at most 10000
+  ids. When it is full, the sender answers `503`. It protects one replica. Two
+  replicas, or a restart inside the window, can take a repeated event. Run one
+  replica until a shared store exists.
+- Other signature schemes come with each vendor recipe (gibson#1561). This
+  sender has one scheme.
 - The text of the webhook is task input. The sender sends no target, so a
   webhook cannot add a target.
 - When the enrollment fails, the sender does not listen. When Gibson refuses the
