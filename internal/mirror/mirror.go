@@ -227,10 +227,14 @@ func (m *Mirror) one(ctx context.Context, a Adapter, it Item, sum *Summary) erro
 
 // Run mirrors every interval until the context ends.
 func (m *Mirror) Run(ctx context.Context, interval time.Duration) error {
-	return intake.Loop(ctx, interval, m.log, "mirror", func(ctx context.Context) error {
+	err := intake.Loop(ctx, interval, m.log, "mirror", func(ctx context.Context) error {
 		sum, err := m.Pass(ctx)
 		m.log.Info("mirror pass done", "opened", sum.Opened, "updated", sum.Updated, "closed", sum.Closed,
 			"unchanged", sum.Unchanged, "no_ticket", sum.NoTicket, "no_connector", sum.NoConnector)
 		return err
 	})
+	if err != nil {
+		return fmt.Errorf("run the mirror: %w", err)
+	}
+	return nil
 }

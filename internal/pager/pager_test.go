@@ -63,7 +63,7 @@ func wait(id string, waited time.Duration) Waiting {
 
 func newPager(t *testing.T, tool Adapter, src *fakeSource, connectors ...string) (*Pager, *bytes.Buffer) {
 	t.Helper()
-	var tools []intake.Tool
+	tools := make([]intake.Tool, 0, len(connectors))
 	for _, c := range connectors {
 		tools = append(tools, intake.Tool{Connector: c, Name: "any"})
 	}

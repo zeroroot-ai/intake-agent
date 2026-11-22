@@ -40,13 +40,19 @@ const (
 )
 
 func main() {
+	os.Exit(exitCode())
+}
+
+// exitCode runs the sender and returns the exit status. It exists so that the
+// signal context stops before the process exits.
+func exitCode() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	if err := run(ctx, os.Getenv); err != nil {
 		slog.Error("webhook-sender", "version", Version, "err", err)
-		stop()
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func run(ctx context.Context, getenv func(string) string) error {
@@ -100,7 +106,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 	case err := <-errc:
 		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
-		shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shut, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shut); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("shutdown: %w", err)

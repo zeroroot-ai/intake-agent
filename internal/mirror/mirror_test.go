@@ -60,13 +60,13 @@ func (f *fakeTicketTool) Open(_ context.Context, _ intake.Caller, it Item) (Tick
 	return *t, nil
 }
 
-func (f *fakeTicketTool) Update(_ context.Context, _ intake.Caller, t Ticket, it Item) error {
+func (f *fakeTicketTool) Update(_ context.Context, _ intake.Caller, _ Ticket, it Item) error {
 	f.tickets[it.ID].Status = it.Status
 	f.tickets[it.ID].Closed = false
 	return nil
 }
 
-func (f *fakeTicketTool) Close(_ context.Context, _ intake.Caller, t Ticket, it Item) error {
+func (f *fakeTicketTool) Close(_ context.Context, _ intake.Caller, _ Ticket, it Item) error {
 	f.tickets[it.ID].Status = it.Status
 	f.tickets[it.ID].Closed = true
 	f.closes++
@@ -80,7 +80,7 @@ func finding(status string) Item {
 
 func newMirror(t *testing.T, tool Adapter, items []Item, connectors ...string) (*Mirror, *fakeSource, *bytes.Buffer) {
 	t.Helper()
-	var tools []intake.Tool
+	tools := make([]intake.Tool, 0, len(connectors))
 	for _, c := range connectors {
 		tools = append(tools, intake.Tool{Connector: c, Name: "any"})
 	}

@@ -219,10 +219,14 @@ func (p *Pager) one(ctx context.Context, a Adapter, w Waiting, key string, sum *
 
 // Run pages every interval until the context ends.
 func (p *Pager) Run(ctx context.Context, interval time.Duration) error {
-	return intake.Loop(ctx, interval, p.log, "pager", func(ctx context.Context) error {
+	err := intake.Loop(ctx, interval, p.log, "pager", func(ctx context.Context) error {
 		sum, err := p.Pass(ctx)
 		p.log.Info("pager pass done", "waiting", sum.Waiting, "paged", sum.Paged, "already", sum.Already,
 			"no_connector", sum.NoConnector, "no_limit", sum.NoLimit)
 		return err
 	})
+	if err != nil {
+		return fmt.Errorf("run the pager: %w", err)
+	}
+	return nil
 }

@@ -231,7 +231,7 @@ func TestOnlyPostIsAccepted(t *testing.T) {
 	g := newGibson(t)
 	s, _ := newSender(t, g, stubSigner{token: tokenOriginate})
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/webhook", nil))
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/webhook", http.NoBody))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status %d, want 405", rec.Code)
 	}
