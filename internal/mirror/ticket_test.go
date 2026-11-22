@@ -493,7 +493,8 @@ func TestAStatusThatTheTitleCannotHoldMakesNoWrite(t *testing.T) {
 	}
 }
 
-// TestTwoTicketsWithOneKeyGiveTheOldestAndALog.
+// TestTwoTicketsWithOneKeyGiveTheOldestAndALog: the adapter takes the oldest ticket
+// and logs the duplicate.
 func TestTwoTicketsWithOneKeyGiveTheOldestAndALog(t *testing.T) {
 	srv := &ticketServer{connectors: []string{"jira"}}
 	key := "gibson:finding:f-1"
