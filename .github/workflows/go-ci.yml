@@ -29,7 +29,7 @@ permissions:
 jobs:
   fast:
     if: github.event_name == 'pull_request'
-    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@78606607ff7c6192237bb05b4610af6bbe16e8ee # v0.22.0
     with:
       tier: fast
       go-mod-path: .
@@ -37,7 +37,7 @@ jobs:
 
   heavy:
     if: github.event_name == 'push'
-    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@a88e99f641209c147aad6cbd3b6d62c2764485ca # v0.21.3
+    uses: zeroroot-ai/.github/.github/workflows/reusable-go-ci.yml@78606607ff7c6192237bb05b4610af6bbe16e8ee # v0.22.0
     with:
       tier: heavy
       go-mod-path: .
@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: true
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: true
